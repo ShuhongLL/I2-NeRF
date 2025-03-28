@@ -1,16 +1,14 @@
-import glob
 import logging
 import os
-import shutil
 import sys
-
-import numpy as np
 import random
-
+import numpy as np
 import time
-
-from absl import app
+import torch
+import accelerate
+import wandb
 import gin
+from absl import app
 from internal import configs
 from internal import datasets
 from internal import image
@@ -19,17 +17,14 @@ from internal import train_utils
 from internal import utils
 from internal import vis
 from internal import checkpoints
-import torch
-import accelerate
-import tensorboardX
 from tqdm import tqdm
 from tqdm.contrib.logging import logging_redirect_tqdm
 from torch.utils._pytree import tree_map
 
 configs.define_common_flags()
+wandb.login()
 
 TIME_PRECISION = 1000  # Internally represent integer times in milliseconds.
-
 
 
 def main(unused_argv):
@@ -116,18 +111,17 @@ def main(unused_argv):
 
     # metric handler
     metric_harness = image.MetricHarness()
+    
+    # SIEM model
+    s3im_func = utils.S3IM(config.luminance_mean).cuda()
+    local_struct_func = utils.Structure_Loss(config.luminance_mean * 15).cuda()
 
-    # tensorboard
+    # wandb
     if accelerator.is_main_process:
-        summary_writer = tensorboardX.SummaryWriter(config.exp_path)
-        # function to convert image for tensorboard
-        tb_process_fn = lambda x: x.transpose(2, 0, 1) if len(x.shape) == 3 else x[None]
+        wandb.init(project=config.project_name, name=config.exp_name)
+        wandb.config.update(config)
+        wandb.run.name = config.checkpoint_dir.split('.')[-1]
 
-        if config.rawnerf_mode:
-            for name, data in zip(['train', 'test'], [dataset, test_dataset]):
-                # Log shutter speed metadata in TensorBoard for debug purposes.
-                for key in ['exposure_idx', 'exposure_values', 'unique_shutters']:
-                    summary_writer.add_text(f'{name}_{key}', str(data.metadata[key]), 0)
     logger.info("Begin training...")
     step = init_step + 1
     total_time = 0
@@ -173,6 +167,9 @@ def main(unused_argv):
                     compute_extras=compute_extras,
                     zero_glo=False)
 
+
+            if step % 1000 == 0:
+                print("check")
             losses = {}
 
             # supervised by data
@@ -200,6 +197,31 @@ def main(unused_argv):
                     config.orientation_loss_mult > 0):
                 losses['orientation'] = train_utils.orientation_loss(batch, module, ray_history,
                                                                      config)
+            if config.enable_media_scatter and config.bs_acc_mult > 0:
+                losses['object_acc'] = train_utils.acc_loss(renderings, config)
+                
+            # if config.enable_conceal and config.conceal_luminance_mult > 0:
+            #     losses['luminance'] = train_utils.luminance_loss(renderings, config)
+                
+            # if config.enable_conceal and config.conceal_local_structure_mult > 0:
+            #     losses['local_structure'] = train_utils.local_contrast_loss(local_struct_func,
+            #                                                                 batch, renderings, config)
+            
+            if config.enable_conceal and config.conceal_ssim_mult > 0:
+                losses['ssim'] = train_utils.similarity_loss(s3im_func, batch, renderings, config)
+                
+            # if config.enable_conceal and config.conceal_luminance_var_mult > 0:
+            #     losses['var_luminance'] = train_utils.luminance_variance_loss(renderings, config)
+            
+            # if config.enable_conceal and config.conceal_trans_multi > 0:
+            #     losses['conceal_trans'] = train_utils.conceal_trans_loss(batch, renderings, config)
+                
+            if config.enable_conceal and config.conceal_pesudo_multi > 0:
+                losses['pesudo_enhanced'] = train_utils.conceal_pesudo_loss(batch, renderings, config)
+                
+            # if config.enable_conceal and config.conceal_color_consist_mult > 0:
+            #     losses['color_consist'] = train_utils.color_consist_loss(renderings, config)
+                
             # hash grid l2 weight decay
             if config.hash_decay_mults > 0:
                 losses['hash_decay'] = train_utils.hash_decay_loss(ray_history, config)
@@ -209,6 +231,7 @@ def main(unused_argv):
                     config.predicted_normal_loss_mult > 0):
                 losses['predicted_normals'] = train_utils.predicted_normal_loss(
                     module, ray_history, config)
+                
             loss = sum(losses.values())
             stats['loss'] = loss.item()
             stats['losses'] = tree_map(lambda x: x.item(), losses)
@@ -252,31 +275,23 @@ def main(unused_argv):
                             for i, vi in enumerate(tuple(v.T)):
                                 stats_split[f'{k}/{i}'] = vi
 
-                    # Summarize the entire histogram of each statistic.
-                    for k, v in stats_split.items():
-                        summary_writer.add_histogram('train_' + k, v, step)
-
                     # Take the mean and max of each statistic since the last summary.
                     avg_stats = {k: np.mean(v) for k, v in stats_split.items()}
                     max_stats = {k: np.max(v) for k, v in stats_split.items()}
 
-                    summ_fn = lambda s, v: summary_writer.add_scalar(s, v, step)  # pylint:disable=cell-var-from-loop
+                    summ_fn_wandb = lambda s, v, step: wandb.log({s: v}, commit=False, step=step)
 
-                    # Summarize the mean and max of each statistic.
-                    for k, v in avg_stats.items():
-                        summ_fn(f'train_avg_{k}', v)
-                    for k, v in max_stats.items():
-                        summ_fn(f'train_max_{k}', v)
+                    summ_fn_wandb('train/num_params', num_params, step)
+                    summ_fn_wandb('train/learning_rate', learning_rate, step)
+                    summ_fn_wandb('train/steps_per_sec', steps_per_sec, step)
+                    summ_fn_wandb('train/rays_per_sec', rays_per_sec, step)
 
-                    summ_fn('train_num_params', num_params)
-                    summ_fn('train_learning_rate', learning_rate)
-                    summ_fn('train_steps_per_sec', steps_per_sec)
-                    summ_fn('train_rays_per_sec', rays_per_sec)
-
-                    summary_writer.add_scalar('train_avg_psnr_timed', avg_stats['psnr'],
-                                              total_time // TIME_PRECISION)
-                    summary_writer.add_scalar('train_avg_psnr_timed_approx', avg_stats['psnr'],
-                                              approx_total_time // TIME_PRECISION)
+                    summ_fn_wandb('train/avg_psnr_timed', avg_stats['psnr'], step)
+                    summ_fn_wandb('train/avg_psnr_timed_approx', avg_stats['psnr'], step)
+                    
+                    if config.enable_conceal:
+                        avg_conceal_density = torch.mean(renderings[-1]['sigma_conceal'].detach()).item()
+                        summ_fn_wandb('train/avg_conceal_density', avg_conceal_density, step)
 
                     if dataset.metadata is not None and module.learned_exposure_scaling:
                         scalings = module.exposure_scaling_offsets.weight
@@ -284,16 +299,22 @@ def main(unused_argv):
                         for i_s in range(num_shutter_speeds):
                             for j_s, value in enumerate(scalings[i_s]):
                                 summary_name = f'exposure/scaling_{i_s}_{j_s}'
-                                summary_writer.add_scalar(summary_name, value, step)
+                                summ_fn_wandb(summary_name, value, step)
 
                     precision = int(np.ceil(np.log10(config.max_steps))) + 1
                     avg_loss = avg_stats['loss']
                     avg_psnr = avg_stats['psnr']
+                    summ_fn_wandb('train/total_loss', avg_stats['loss'], step)
+                    
                     str_losses = {  # Grab each "losses_{x}" field and print it as "x[:4]".
                         k[7:11]: (f'{v:0.5f}' if 1e-4 <= v < 10 else f'{v:0.1e}')
                         for k, v in avg_stats.items()
                         if k.startswith('losses/')
                     }
+                    
+                    [summ_fn_wandb(f'train/{key}', avg_stats['loss'], step) for key, val in avg_stats.items()
+                    if key.startswith(f'losses/{key[7:11]}') ]
+                    
                     logger.info(f'{step}' + f'/{config.max_steps:d}:' +
                                 f'loss={avg_loss:0.5f},' + f'psnr={avg_psnr:.3f},' +
                                 f'lr={learning_rate:0.2e} | ' +
@@ -334,7 +355,7 @@ def main(unused_argv):
                     eval_time = time.time() - eval_start_time
                     num_rays = np.prod(test_batch['directions'].shape[:-1])
                     rays_per_sec = num_rays / eval_time
-                    summary_writer.add_scalar('test_rays_per_sec', rays_per_sec, step)
+                    summ_fn_wandb('test/rays_per_sec', rays_per_sec, step)
 
                     metric_start_time = time.time()
                     metric = metric_harness(
@@ -344,7 +365,7 @@ def main(unused_argv):
                     for name, val in metric.items():
                         if not np.isnan(val):
                             logger.info(f'{name} = {val:.4f}')
-                            summary_writer.add_scalar('train_metrics/' + name, val, step)
+                            summ_fn_wandb(f'train_metrics/{name}', val, step)
 
                     if config.vis_decimate > 1:
                         d = config.vis_decimate
@@ -362,27 +383,45 @@ def main(unused_argv):
                         vis_suite['color_raw'] = rendering['rgb']
                         # Autoexposed colors.
                         vis_suite['color_auto'] = postprocess_fn(rendering['rgb'], None)
-                        summary_writer.add_image('test_true_auto',
-                                                 tb_process_fn(postprocess_fn(test_batch['rgb'], None)), step)
+                        summ_fn_wandb('test/true_auto', wandb.Image(postprocess_fn(test_batch['rgb'], None)), step)
+
                         # Exposure sweep colors.
                         exposures = test_dataset.metadata['exposure_levels']
                         for p, x in list(exposures.items()):
-                            vis_suite[f'color/{p}'] = postprocess_fn(rendering['rgb'], x)
-                            summary_writer.add_image(f'test_true_color/{p}',
-                                                     tb_process_fn(postprocess_fn(test_batch['rgb'], x)), step)
-                    summary_writer.add_image('test_true_color', tb_process_fn(test_batch['rgb']), step)
+                            vis_suite[f'exposure_{p}'] = postprocess_fn(rendering['rgb'], x)
+                            summ_fn_wandb(f'test/true_color_{p}', wandb.Image(postprocess_fn(test_batch['rgb'], x)), step)
+                    
+                    summ_fn_wandb(f'test/true_color', wandb.Image(test_batch['rgb']), step)        
                     if config.compute_normal_metrics:
-                        summary_writer.add_image('test_true_normals',
-                                                 tb_process_fn(test_batch['normals']) / 2. + 0.5, step)
+                        summ_fn_wandb(f'test/true_normals', wandb.Image(test_batch['normals'] / 2. + 0.5), step)
+    
+                    if config.enable_conceal:
+                        vis_suite['light_rgb'] = rendering['light_rgb']
+                    if config.enable_media_scatter:
+                        vis_suite['color'] = rendering['rgb']
+                        vis_suite['J'] = rendering['J']
+                        vis_suite['bs_rgb'] = rendering['bs_rgb']
+                        vis_suite['c_med'] =  np.mean(rendering['c_med'], axis=2)
+                        vis_suite['sigma_bs'] = np.mean(rendering['sigma_bs'], axis=2)
+                        vis_suite['sigma_atten'] = np.mean(rendering['sigma_atten'], axis=2)
+                    if config.enable_media_scatter and config.enable_conceal:
+                        vis_suite['light_rgb'] = rendering['light_rgb']
+                        vis_suite['light_J'] = rendering['light_J']
+                        vis_suite['light_bs_rgb'] = rendering['light_bs_rgb']
+    
                     for k, v in vis_suite.items():
-                        summary_writer.add_image('test_output_' + k, tb_process_fn(v), step)
-
+                        summ_fn_wandb(f'test/output_{k}', wandb.Image(np.asarray(v)), step)
+                        utils.save_img_u8(np.asarray(v), os.path.join(config.exp_path, f'{k}_{step}.png'))
+                        
+                    wandb.log({'step': step}, commit=True, step=step)
+                    
     if accelerator.is_main_process and config.max_steps > init_step:
         logger.info('Saving last checkpoint at step {} to {}'.format(step, config.checkpoint_dir))
         checkpoints.save_checkpoint(config.checkpoint_dir,
                                     accelerator, step,
                                     config.checkpoints_total_limit)
     logger.info('Finish training.')
+    wandb.finish()
 
 
 if __name__ == '__main__':

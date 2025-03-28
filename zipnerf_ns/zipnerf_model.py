@@ -24,6 +24,8 @@ from internal.models import Model as zipnerf
 import gin
 import numpy as np
 from nerfstudio.utils import colormaps
+
+
 @dataclass
 class ZipNerfModelConfig(ModelConfig):
     gin_file: list = None 
@@ -39,6 +41,7 @@ class ZipNerfModelConfig(ModelConfig):
     background_color: Literal["random", "black", "white"] = "white"
     """Whether to randomize the background color."""
     _target: Type = field(default_factory=lambda: ZipNerfModel)
+
 
 class ZipNerfModel(Model):
     config: ZipNerfModelConfig

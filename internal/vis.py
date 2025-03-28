@@ -1,6 +1,7 @@
 from internal import stepfun
 import numpy as np
 from matplotlib import cm
+import matplotlib.pyplot as plt
 
 
 def weighted_percentile(x, w, ps, assume_sorted=False):
@@ -160,6 +161,7 @@ def visualize_suite(rendering, batch):
 
     rgb = rendering['rgb']
     acc = rendering['acc']
+    # depth = rendering['depth']
 
     distance_mean = rendering['distance_mean']
     distance_median = rendering['distance_median']
@@ -224,6 +226,7 @@ def visualize_suite(rendering, batch):
         'color': rgb,
         'acc': acc,
         'color_matte': matte(rgb, acc),
+        # 'depth': depth,
         'depth_mean': vis_depth_mean,
         'depth_median': vis_depth_median,
         'depth_triplet': vis_depth_triplet,
@@ -242,5 +245,21 @@ def visualize_suite(rendering, batch):
 
     if 'roughness' in rendering:
         vis['roughness'] = matte(np.tanh(rendering['roughness']), acc)
+        
+    if 'sigma_conceal' in rendering:
+        # visualize concealing density
+        sigma_conceal = rendering['sigma_conceal'] # [h, w, samples, 1]
+        sigma_conceal = sigma_conceal.reshape(-1, sigma_conceal.shape[2]) # [h * w, samples]
+    
+        num_rand_sample = 1000
+        indices = np.random.permutation(sigma_conceal.shape[0])[:num_rand_sample]
+        sigma_conceal = sigma_conceal[indices] # [128, samples]
+        vis['conceal_density'] = plt.cm.viridis(sigma_conceal.T)
+        
+        # visualize object density
+        sigma_obj = rendering['sigma_obj'] # [h, w, samples, 1]
+        sigma_obj = sigma_obj.reshape(-1, sigma_obj.shape[2]) # [h * w, samples]
+        sigma_obj = sigma_obj[indices] # [128, samples]
+        vis['object_density'] = plt.cm.viridis(sigma_obj.T)
 
     return vis

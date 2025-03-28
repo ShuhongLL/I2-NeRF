@@ -1,8 +1,8 @@
-Config.exp_name = 'test'
+COnfig.project_name = 'media-nerf'
 Config.dataset_loader = 'llff'
 Config.near = 0.2
 Config.far = 1e6
-Config.factor = 4
+Config.factor = 0
 
 Model.raydist_fn = 'power_transformation'
 Model.opaque_background = True

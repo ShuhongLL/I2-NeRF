@@ -1,0 +1,24 @@
+COnfig.project_name = 'media-nerf'
+Config.dataset_loader = 'llff'
+Config.near = 0.
+Config.far = 1.
+Config.factor = 0
+Config.forward_facing = True
+Config.adam_eps = 1e-8
+Config.data_loss_type = 'rawnerf'
+Config.constant_media = False
+Config.enable_media_scatter = True
+Config.bs_acc_mult = 0.0001
+
+Model.opaque_background = False
+Model.num_levels = 2
+Model.num_prop_samples = 128
+Model.num_nerf_samples = 32
+
+PropMLP.disable_density_normals = True
+PropMLP.disable_rgb = True
+
+NerfMLP.disable_density_normals = True
+
+NerfMLP.max_deg_point = 16
+PropMLP.max_deg_point = 16

@@ -183,68 +183,199 @@ def cast_rays(tdist, origins, directions, cam_dirs, radii, rand=True, n=7, m=3, 
     return means, stds, t
 
 
-def compute_alpha_weights(density, tdist, dirs, opaque_background=False):
-    """Helper function for computing alpha compositing weights."""
+# def compute_alpha_weights(density, tdist, dirs, opaque_background=False):
+#     """Helper function for computing alpha compositing weights."""
+#     t_delta = tdist[..., 1:] - tdist[..., :-1]
+#     delta = t_delta * torch.norm(dirs[..., None, :], dim=-1)
+#     density_delta = density * delta
+
+#     if opaque_background:
+#         # Equivalent to making the final t-interval infinitely wide.
+#         density_delta = torch.cat([
+#             density_delta[..., :-1],
+#             torch.full_like(density_delta[..., -1:], torch.inf)
+#         ], dim=-1)
+
+#     alpha = 1 - torch.exp(-density_delta)
+#     trans = torch.exp(-torch.cat([
+#         torch.zeros_like(density_delta[..., :1]),
+#         torch.cumsum(density_delta[..., :-1], dim=-1)
+#     ], dim=-1))
+#     weights = alpha * trans
+#     return weights, alpha, trans
+
+
+def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_conceal, tdist,
+                          dirs, extra_samples=False, opaque_background=False):
     t_delta = tdist[..., 1:] - tdist[..., :-1]
     delta = t_delta * torch.norm(dirs[..., None, :], dim=-1)
-    density_delta = density * delta
-
+    density_delta = sigma_obj * delta
+    
     if opaque_background:
         # Equivalent to making the final t-interval infinitely wide.
         density_delta = torch.cat([
             density_delta[..., :-1],
             torch.full_like(density_delta[..., -1:], torch.inf)
         ], dim=-1)
-
-    alpha = 1 - torch.exp(-density_delta)
-    trans = torch.exp(-torch.cat([
+    
+    # Object
+    obj_alpha = 1 - torch.exp(-density_delta)
+    obj_trans = torch.exp(-torch.cat([
         torch.zeros_like(density_delta[..., :1]),
         torch.cumsum(density_delta[..., :-1], dim=-1)
     ], dim=-1))
-    weights = alpha * trans
-    return weights, alpha, trans
+    obj_weights = obj_alpha * obj_trans
+    
+    bs_trans = None
+    atten_trans = None
+    conceal_trans = None
+    bs_weights = None
+    
+    # Extra sampling before the first point of tdist.
+    if extra_samples:
+        extra_sample_len = 33
+        t_media_dist = torch.stack([
+            torch.linspace(0, end_value.item(), extra_sample_len) for end_value in tdist[..., 0].detach().reshape(-1)
+        ], dim=0).reshape(*tdist.shape[:-1], extra_sample_len).cuda()
+        # t_media_dist = torch.linspace(0, tdist[..., 0].detach(), 33, dim=-1)
+        t_media_dist_sort = torch.cat([t_media_dist[..., :-1], tdist.detach()], dim=-1)
+        
+        t_media_delta = t_media_dist_sort[..., 1:] - t_media_dist_sort[..., :-1]
+        media_delta = t_media_delta.detach() * torch.norm(dirs[..., None, :], dim=-1)
+
+        # Insert 1 in front of the object trans
+        extra_trans = torch.ones_like(t_media_dist)[..., :-1]
+        obj_trans = torch.cat([extra_trans, obj_trans], dim=-1)
+        
+        # # Insert 0 in front of the object weight
+        # extra_weights = torch.zeros(*obj_weights.shape[:-1], extra_sample_len, requires_grad=False).cuda()
+        # obj_weights = torch.cat([extra_weights, obj_weights], dim=-1)
+    else:
+        media_delta = t_delta.detach() * torch.norm(dirs[..., None, :], dim=-1)
+        
+    # Conceal field
+    if sigma_conceal is not None:
+        conceal_density_delta = sigma_conceal * media_delta[..., None]
+        conceal_trans = torch.exp(-torch.cat([
+            torch.zeros_like(conceal_density_delta[..., :1, :]),
+            torch.cumsum(conceal_density_delta[..., :-1, :], dim=-2)
+        ], dim=-2))
+    
+    # Scatter media
+    if sigma_bs is not None and sigma_atten is not None:
+        bs_density_delta = sigma_bs * media_delta[..., None]
+        bs_alpha = 1 - torch.exp(-bs_density_delta)
+        
+        bs_trans = torch.exp(-torch.cat([
+            torch.zeros_like(bs_density_delta[..., :1, :]),
+            torch.cumsum(bs_density_delta[..., :-1, :], dim=-2)
+        ], dim=-2))
+        
+        # if extra_samples:
+        #     atten_density_delta = sigma_atten * delta[..., None]
+        #     atten_delta = media_delta[..., :(t_media_dist.shape[-1] - 1)] # exclude the last dist
+        #     atten_bs_density_delta = sigma_atten * (atten_delta[..., None])
+        #     atten_trans = torch.exp(-torch.cat([
+        #         torch.zeros_like(atten_density_delta[..., :1, :]),
+        #         torch.cumsum(atten_density_delta[..., :-1, :], dim=-2) + \
+        #         atten_bs_density_delta.sum(dim=-2)[..., None, :]],
+        #     dim=-2))
+        atten_density_delta = sigma_atten * media_delta[..., None]
+        atten_trans = torch.exp(-torch.cat([
+            torch.zeros_like(atten_density_delta[..., :1, :]),
+            torch.cumsum(atten_density_delta[..., :-1, :], dim=-2)
+        ], dim=-2))
+
+        bs_weights = bs_alpha * bs_trans
+ 
+    return obj_weights, bs_weights, obj_trans, bs_trans, atten_trans, conceal_trans
 
 
-def volumetric_rendering(rgbs,
-                         weights,
-                         tdist,
-                         bg_rgbs,
-                         t_far,
-                         compute_extras,
-                         extras=None):
+def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_trans, conceal_trans,
+                         tdist, bg_rgbs, t_far, compute_extras, extras=None, extra_samples=False):
     """Volumetric Rendering Function.
 
-  Args:
-    rgbs: color, [batch_size, num_samples, 3]
-    weights: weights, [batch_size, num_samples].
-    tdist: [batch_size, num_samples].
-    bg_rgbs: the color(s) to use for the background.
-    t_far: [batch_size, 1], the distance of the far plane.
-    compute_extras: bool, if True, compute extra quantities besides color.
-    extras: dict, a set of values along rays to render by alpha compositing.
+    Args:
+        rgbs: color, [batch_size, num_samples, 3]
+        c_med: medium's color, [batch_size, 1, 3].
+        weights: object weights, [batch_size, num_samples].
+        bs_weights: medium's (additive component) weights, [batch_size, num_samples, 3].
+        full_trans: full transmittance of object including the extra samples if exist, [batch_size, extra_samples+num_samples].
+        trans_atten: medium's attenuation transmission,  exp(-sigma_atten*s_i) , [batch_size, num_samples, 3].
+        conceal_trans: concealing field's transmission, [batch_size, num_samples, 1].
+        tdist: [batch_size, num_samples].
+        bg_rgbs: the color(s) to use for the background.
+        t_far: [batch_size, 1], the distance of the far plane.
+        compute_extras: bool, if True, compute extra quantities besides color.
+        extras: dict, a set of values along rays to render by alpha compositing.
 
-  Returns:
-    rendering: a dict containing an rgb image of size [batch_size, 3], and other
-      visualizations if compute_extras=True.
-  """
+    Returns:
+        rendering: a dict containing an rgb image of size [batch_size, 3], and other
+        visualizations if compute_extras=True.
+    """
+    extra_sample_len = 33
     eps = torch.finfo(rgbs.dtype).eps
-    # eps = 1e-3
     rendering = {}
 
     acc = weights.sum(dim=-1)
     bg_w = (1 - acc[..., None]).clamp_min(0.)  # The weight of the background.
-    rgb = (weights[..., None] * rgbs).sum(dim=-2) + bg_w * bg_rgbs
+    
+    origin_rgb = (weights[..., None] * rgbs).sum(axis=-2)
+    
+    if bs_weights is None:
+        if conceal_trans is None:
+            # Original rendering
+            rendering['rgb'] = origin_rgb
+        else:
+            # Concealing field
+            rgb = (weights[..., None] * conceal_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
+            rendering.update({
+                'rgb': rgb,
+                'light_rgb': origin_rgb,
+                'conceal_trans': conceal_trans
+            })
+    else:
+        if conceal_trans is None:
+            # Scatter media
+            object_atten_rgb = (weights[..., None] * atten_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
+            media_rgb = (bs_weights * full_trans[..., None] * c_med).sum(axis=-2)
+            rendering.update({
+                'J': origin_rgb,
+                'bs_rgb': media_rgb,
+                'rgb': object_atten_rgb + media_rgb,
+                'c_med': c_med,
+            })
+        else:
+            # Concealing field + scatter media
+            object_product = weights[..., None] * atten_trans[..., extra_sample_len-1:, :] * rgbs
+            media_product = bs_weights * full_trans[..., None] * c_med
+            
+            conceal_J = (weights[..., None] * conceal_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
+            conceal_object_rgb = (object_product * conceal_trans[..., extra_sample_len-1:, :]).sum(axis=-2)
+            conceal_media_rgb = (media_product * conceal_trans).sum(axis=-2)
+            light_object_rgb = object_product.sum(axis=-2)
+            light_media_rgb = media_product.sum(axis=-2)
+
+            rendering.update({
+                'rgb': conceal_object_rgb + conceal_media_rgb,
+                'J': conceal_J,
+                'bs_rgb': conceal_media_rgb,
+                'light_rgb': light_object_rgb + light_media_rgb,
+                'light_J': origin_rgb,
+                'light_bs_rgb': light_media_rgb,
+                'c_med': c_med,
+                'conceal_trans': conceal_trans
+            })
+    
     t_mids = 0.5 * (tdist[..., :-1] + tdist[..., 1:])
     depth = (
         torch.clip(
             torch.nan_to_num((weights * t_mids).sum(dim=-1) / acc.clamp_min(eps), torch.inf),
             tdist[..., 0], tdist[..., -1]))
-
-    rendering['rgb'] = rgb
     rendering['depth'] = depth
-    rendering['acc'] = acc
-
+    
     if compute_extras:
+        rendering['acc'] = acc
         if extras is not None:
             for k, v in extras.items():
                 if v is not None:

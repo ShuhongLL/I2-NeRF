@@ -1,4 +1,4 @@
-Config.exp_name = 'test'
+Config.project_name = 'media-nerf'
 Config.dataset_loader = 'blender'
 Config.near = 2
 Config.far = 6

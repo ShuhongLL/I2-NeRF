@@ -1,11 +1,11 @@
-import dataclasses
 import os
-from typing import Any, Callable, Optional, Tuple, List
+import dataclasses
+import gin
 import numpy as np
 import torch
 import torch.nn.functional as F
+from typing import Any, Callable, Optional, Tuple, List
 from absl import flags
-import gin
 from internal import utils
 
 gin.add_config_file_search_path('configs/')
@@ -26,7 +26,7 @@ class Config:
     seed = 0
     dataset_loader: str = 'llff'  # The type of dataset loader to use.
     batching: str = 'all_images'  # Batch composition, [single_image, all_images].
-    batch_size: int = 2 ** 16  # The number of rays/pixels in each batch.
+    batch_size: int = 2 ** 9  # The number of rays/pixels in each batch.
     patch_size: int = 1  # Resolution of patches sampled for training batches.
     factor: int = 4  # The downsample factor of images, 0 for no downsampling.
     multiscale: bool = False  # use multiscale data for training.
@@ -41,11 +41,15 @@ class Config:
     use_tiffs: bool = False  # If True, use 32-bit TIFFs. Used only by Blender.
     compute_disp_metrics: bool = False  # If True, load and compute disparity MSE.
     compute_normal_metrics: bool = False  # If True, load and compute normal MAE.
+    use_bright_channel_prior: bool = False # If True, use bright channel prior.
+    use_bcp_atmospheric_light: bool = False # If True, use bright channel prior to sample the dark atmospheric light
+    bcp_kernel_size: int = 5 # Kenerl size for local bright channel.
     disable_multiscale_loss: bool = False  # If True, disable multiscale loss.
     randomized: bool = True  # Use randomized stratified sampling.
     near: float = 2.  # Near plane distance.
     far: float = 6.  # Far plane distance.
     exp_name: str = "test"  # experiment name
+    project_name: str = "media-nerf" # project name for wandb
     data_dir: Optional[str] = "/SSD_DISK/datasets/360_v2/bicycle"  # Input data directory.
     vocab_tree_path: Optional[str] = None  # Path to vocab tree for COLMAP.
     render_chunk_size: int = 65536  # Chunk size for whole-image renderings.
@@ -67,7 +71,7 @@ class Config:
     checkpoints_total_limit: int = 1
     gradient_scaling: bool = False  # If True, scale gradients as in https://gradient-scaling.github.io/.
     print_every: int = 100  # The number of steps between reports to tensorboard.
-    train_render_every: int = 500  # Steps between test set renders when training
+    train_render_every: int = 1000 # Steps between test set renders when training
     data_loss_type: str = 'charb'  # What kind of loss to use ('mse' or 'charb').
     charb_padding: float = 0.001  # The padding used for Charbonnier loss.
     data_loss_mult: float = 1.0  # Mult for the finest data term in the loss.
@@ -163,7 +167,26 @@ class Config:
     tsdf_resolution: int = 512
     truncation_margin: float = 5.0
     tsdf_max_radius: float = 10.0  # in world space
-
+    
+    # scattering media
+    enable_media_scatter: bool = False
+    constant_media: bool = True
+    extra_samples: bool = False
+    bs_acc_factor: float = 1
+    bs_acc_mult: float = 0
+    
+    # conceal field
+    enable_conceal: bool = False
+    conceal_luminance_mult: float = 0
+    conceal_local_structure_mult: float = 0
+    conceal_color_consist_mult: float = 0
+    conceal_luminance_var_mult: float = 0
+    conceal_ssim_mult: float = 0
+    conceal_trans_multi: float = 0
+    conceal_pesudo_multi: float = 0
+    # pixel_mean: float = 0
+    luminance_mean: float = 0
+    
 
 def define_common_flags():
     # Define the flags used by both train.py and eval.py

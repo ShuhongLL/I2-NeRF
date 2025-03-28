@@ -1,24 +1,19 @@
+import sys
 import abc
 import copy
 import json
 import os
 import cv2
+import numpy as np
+import torch
+from PIL import Image
+from tqdm import tqdm
 from internal import camera_utils
 from internal import configs
 from internal import image as lib_image
 from internal import raw_utils
 from internal import utils
 from collections import defaultdict
-import numpy as np
-import cv2
-from PIL import Image
-import torch
-from tqdm import tqdm
-# This is ugly, but it works.
-import sys
-
-# sys.path.insert(0, 'internal/pycolmap')
-# sys.path.insert(0, 'internal/pycolmap/pycolmap')
 from .pycolmap import pycolmap
 
 
@@ -216,6 +211,8 @@ class Dataset(torch.utils.data.Dataset):
     metadata: dict, optional metadata for raw datasets.
     near: float, near plane value for rays.
     normal_images: np.ndarray, optional array of surface normal vector data.
+    bcp_trans: np.ndarray, optional array of bcp transmittance.
+    bcp_enhanced: np.ndarray, optional array of bcp enhanced images.
     pixtocams: np.ndarray, one or a list of inverse intrinsic camera matrices.
     pixtocam_ndc: np.ndarray, the inverse intrinsic matrix used for NDC space.
     poses: np.ndarray, optional array of auxiliary camera pose data.
@@ -246,6 +243,8 @@ class Dataset(torch.utils.data.Dataset):
         self._num_border_pixels_to_mask = config.num_border_pixels_to_mask
         self._apply_bayer_mask = config.apply_bayer_mask
         self._render_spherical = False
+        self._load_bcp = config.use_bright_channel_prior
+        self._use_bcp_atmospheric_light = config.use_bcp_atmospheric_light
 
         self.config = config
         self.global_rank = config.global_rank
@@ -259,6 +258,9 @@ class Dataset(torch.utils.data.Dataset):
         self.disp_images = None
         self.normal_images = None
         self.alphas = None
+        self.bcp_kernel_size = config.bcp_kernel_size
+        self.bcp_trans = None
+        self.bcp_enhanced = None
         self.poses = None
         self.pixtocam_ndc = None
         self.metadata = None
@@ -402,6 +404,9 @@ class Dataset(torch.utils.data.Dataset):
         if self._load_normals:
             batch['normals'] = self.normal_images[cam_idx, pix_y_int, pix_x_int]
             batch['alphas'] = self.alphas[cam_idx, pix_y_int, pix_x_int]
+        if self._load_bcp:
+            batch['bcp_trans'] = self.bcp_trans[cam_idx, pix_y_int, pix_x_int]
+            batch['bcp_enhanced'] = self.bcp_enhanced[cam_idx, pix_y_int, pix_x_int]
         return {k: torch.from_numpy(v.copy()).float() if v is not None else None for k, v in batch.items()}
 
     def _next_train(self, item):
@@ -476,12 +481,14 @@ class Blender(Dataset):
         images = []
         disp_images = []
         normal_images = []
+        bcp_trans = []
+        bcp_enhanced = []
         cams = []
         for idx, frame in enumerate(tqdm(meta['frames'], desc='Loading Blender dataset', disable=self.global_rank != 0, leave=False)):
             fprefix = os.path.join(self.data_dir, frame['file_path'])
 
-            def get_img(f, fprefix=fprefix):
-                image = utils.load_img(fprefix + f)
+            def get_img(fprefix=fprefix):
+                image = utils.load_img(fprefix)
                 if config.factor > 1:
                     image = lib_image.downsample(image, config.factor)
                 return image
@@ -491,7 +498,7 @@ class Blender(Dataset):
                 # Convert image to sRGB color space.
                 image = lib_image.linear_to_srgb_np(np.stack(channels, axis=-1))
             else:
-                image = get_img('.png') / 255.
+                image = get_img() / 255.
             images.append(image)
 
             if self._load_disps:
@@ -500,7 +507,21 @@ class Blender(Dataset):
             if self._load_normals:
                 normal_image = get_img('_normal.png')[..., :3] * 2. / 255. - 1.
                 normal_images.append(normal_image)
-
+            if self._load_bcp:
+                bright = utils.cal_bright_channel(image, self.bcp_kernel_size)
+                if self._use_bcp_atmospheric_light:
+                    A = utils.estimate_atmospheric_light(image, bright)
+                else:
+                    A = np.zeros(3) + 1e-3
+                trans = utils.calculate_transmission(image, A, self.bcp_kernel_size)
+                trans_min = utils.calcualte_min_transmission(image, A)
+                trans_min = np.clip(trans_min, 0.1, 1)
+                refined_trans = utils.guided_filter(image[:, :, 0], trans, r=self.bcp_kernel_size, eps=1e-3)
+                refined_trans = np.clip(refined_trans, trans_min, 1)[..., None] # [h, w, 1]
+                J = (image - A[None, None,:]) / refined_trans + A[None, None,:] # [h, w, 3]
+                bcp_trans.append(refined_trans)
+                bcp_enhanced.append(J)
+                
             cams.append(np.array(frame['transform_matrix'], dtype=np.float32))
 
         self.images = np.stack(images, axis=0)
@@ -509,9 +530,13 @@ class Blender(Dataset):
         if self._load_normals:
             self.normal_images = np.stack(normal_images, axis=0)
             self.alphas = self.images[..., -1]
+        if self._load_bcp:
+            self.bcp_trans = np.stack(bcp_trans, axis=0)
+            self.bcp_enhanced = np.stack(bcp_enhanced, axis=0)
 
-        rgb, alpha = self.images[..., :3], self.images[..., -1:]
-        self.images = rgb * alpha + (1. - alpha)  # Use a white background.
+        if self.images.shape[-1] == 4:
+            rgb, alpha = self.images[..., :3], self.images[..., -1:]
+            self.images = rgb * alpha + (1. - alpha)  # Use a white background.
         self.height, self.width = self.images.shape[1:3]
         self.camtoworlds = np.stack(cams, axis=0)
         self.focal = .5 * self.width / np.tan(.5 * float(meta['camera_angle_x']))

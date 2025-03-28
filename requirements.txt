@@ -1,6 +1,6 @@
 numpy
-torch
-absl_py
+# torch
+# absl_py
 accelerate
 gin_config
 imageio
@@ -19,6 +19,7 @@ ninja
 scipy
 scikit-image
 scikit-learn
-tensorboard
-tensorboardX
+# tensorboard
+# tensorboardX
 tqdm
+wandb

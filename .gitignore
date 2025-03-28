@@ -6,10 +6,17 @@ tests/__pycache__/
 .idea/
 __MACOSX/
 exp/
+exp*/
+extensions/cuda/build
+extensions/cuda/cuda*
+wandb/
+zipnerf.egg-info/
 data/
+logs*/
 assets/
 test.py
 test2.py
+test.ipynb
 *.mp4
 *.ply
 scripts/train_360_debug.sh

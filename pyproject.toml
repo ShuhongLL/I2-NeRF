@@ -45,3 +45,5 @@ configs = ["*.gin"]
 # register the entry point of your new method here:
 [project.entry-points.'nerfstudio.method_configs']
 zipnerf_ns = 'zipnerf_ns.zipnerf_config:zipnerf_method'
+
+# export NERFSTUDIO_METHOD_CONFIGS="myzipnerf=zipnerf_ns.zipnerf_config:zipnerf_method"

@@ -6,14 +6,21 @@ Config.factor = 0
 Config.forward_facing = True
 Config.adam_eps = 1e-8
 Config.data_loss_type = 'rawnerf'
-Config.constant_media = False
-Config.enable_media_scatter = True
+Config.llff_use_all_images_for_testing = True
+Config.max_steps = 10000
+Config.checkpoint_every = 1000
+Config.checkpoints_total_limit = 16
+Config.batch_size = 1024
+Config.enable_scatter = True
+Config.enable_spatial_media = False
 Config.bs_acc_mult = 0.0001
+Config.enable_downwell_depth = True
 
 Model.opaque_background = False
 Model.num_levels = 2
 Model.num_prop_samples = 128
 Model.num_nerf_samples = 32
+Model.num_extra_media_samples = 32
 
 PropMLP.disable_density_normals = True
 PropMLP.disable_rgb = True

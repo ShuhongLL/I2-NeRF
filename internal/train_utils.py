@@ -112,7 +112,7 @@ def compute_data_loss(batch, renderings, config):
             data_loss = 0.1 * ((inverse_tonemap(rgb_render_clip) - inverse_tonemap(rgb_target)) ** 2)
         else:
             assert False
-        data_losses.append((lossmult * data_loss).sum() / denom)
+        data_losses.append((config.data_loss_mult * lossmult * data_loss).sum() / denom)
 
         if config.compute_disp_metrics:
             # Using mean to compute disparity, but other distance statistics can
@@ -204,27 +204,26 @@ def luminance_loss(renderings, config):
         config.data_coarse_loss_mult * sum(data_losses[:-1]) +
         config.data_loss_mult * data_losses[-1]
     )
-    return config.conceal_luminance_mult * loss
+    return config.absorb_luminance_mult * loss
 
 
-def conceal_trans_loss(batch, renderings, config):
+def object_depth_loss(batch, renderings, config):
     data_losses = []
     for rendering in renderings:
-        if 'conceal_trans' not in rendering:
-            continue
-        conceal_trans_mean = torch.mean(rendering['conceal_trans'], dim=-2)
-        bcp_trans = batch['bcp_trans']
-        data_loss = torch.mean((conceal_trans_mean - bcp_trans) ** 2)
+        rendered_depth = rendering['depth']
+        acc = rendering['acc'].detach()
+        delta = (torch.max(rendered_depth) - torch.min(rendered_depth))
+        normalized_depth = (rendered_depth - torch.min(rendered_depth)) / delta
+        data_loss = torch.mean(((batch['depths'] - normalized_depth) ** 2) * acc)
         data_losses.append(data_loss)
-        
     loss = (
         config.data_coarse_loss_mult * sum(data_losses[:-1]) +
         config.data_loss_mult * data_losses[-1]
     )
-    return config.conceal_trans_multi * loss
+    return config.depth_multi * loss
+
     
-    
-def conceal_pesudo_loss(batch, renderings, config):
+def absorb_pesudo_loss(batch, renderings, config):
     data_losses = []
     for rendering in renderings:
         if 'light_rgb' not in rendering:
@@ -238,8 +237,50 @@ def conceal_pesudo_loss(batch, renderings, config):
         config.data_coarse_loss_mult * sum(data_losses[:-1]) +
         config.data_loss_mult * data_losses[-1]
     )
-    return config.conceal_pesudo_multi * loss
+    return config.absorb_pesudo_multi * loss
     
+def min_overlap_loss(renderings, config):
+    last_rendering = renderings[-1]
+    sigma_obj = last_rendering['sigma_obj'].detach()
+    sigma_obj = torch.max(torch.zeros_like(sigma_obj), sigma_obj - config.overlap_threshold)
+    loss = 0
+    sigma_names = ['sigma_absorb', 'sigma_atten', 'sigma_bs']
+    for sigma_name in sigma_names:
+        if sigma_name in last_rendering:
+            sigma = last_rendering[sigma_name]
+            loss += torch.mean(sigma_obj.squeeze() * sigma.mean(dim=-1))
+    return config.media_overlap_multi * loss
+
+
+def media_monotonic_loss(renderings, config):
+    last_rendering = renderings[-1]
+    loss = 0
+    sigma_names = ['sigma_absorb', 'sigma_atten', 'sigma_bs']
+    for sigma_name in sigma_names:
+        if sigma_name in last_rendering:
+            sigma = last_rendering[sigma_name].mean(dim=-1).squeeze()
+            # diff = sigma[:, 1:] - sigma[:, :-1]
+            # pos_increases = F.relu(diff)
+            pos_increases = torch.abs(sigma[:, 1:] - sigma[:, :-1])
+            loss += torch.sum(pos_increases, dim=-1).mean()
+    return config.media_monotonic_multi * loss
+
+
+def absorb_trans_loss(batch, renderings, ray_history, config):
+    last_rendering = renderings[-1]
+    last_ray_results = ray_history[-1]
+    absorb_trans = last_ray_results['absorb_trans'].squeeze(-1) # [batch_size, ..., num_samples]
+    tdist = last_ray_results['tdist']
+    bcp_trans = batch['bcp_trans'] # [batch_size, ..., 1]
+    depth = last_rendering['depth']
+    depth = depth.unsqueeze(-1) # [batch_size, ..., 1]
+    # Subtract 1 to get the last index where tdist < depth.
+    idx = torch.searchsorted(tdist, depth, right=False) - 1 # [batch_size, ..., 1]
+    idx = idx.clamp(min=0, max=tdist.size(-1)-2)
+    absorb_tran = torch.gather(absorb_trans, dim=-1, index=idx) # [batch_size, ..., 1]
+    loss = torch.mean((absorb_tran - bcp_trans) ** 2)
+    return config.absorb_trans_multi * loss
+
     
 def color_consist_loss(renderings, config):
     data_losses = []
@@ -258,74 +299,25 @@ def color_consist_loss(renderings, config):
         config.data_coarse_loss_mult * sum(data_losses[:-1]) +
         config.data_loss_mult * data_losses[-1]
     )
-    return config.conceal_color_consist_mult * loss
-
-
-def local_contrast_loss(local_structure_func, batch, renderings, config):
-    data_losses = []
-    for rendering in renderings:
-        if 'light_rgb' not in rendering:
-            continue
-        light_rgb = rendering['light_rgb'] # [batch_size, 1, 1, 3]
-        input_rgb = batch['rgb'][..., :3]
-        data_loss = local_structure_func(light_rgb, input_rgb)
-        data_losses.append(data_loss)
-        
-    loss = (
-        config.data_coarse_loss_mult * sum(data_losses[:-1]) +
-        config.data_loss_mult * data_losses[-1]
-    )
-    return config.conceal_local_structure_mult * loss
+    return config.absorb_color_consist_mult * loss
 
 
 def similarity_loss(s3im_func, batch, renderings, config):
-    data_losses = []
-    for rendering in renderings:
-        if 'light_rgb' not in rendering:
-            continue
-        light_rgb = rendering['light_rgb'] # [batch_size, 1, 1, 3]
-        # input_rgb = batch['rgb'][..., :3]
-        enhanced_rgb = batch['bcp_enhanced'][..., :3]
-        data_loss = s3im_func(light_rgb, enhanced_rgb)
-        data_losses.append(data_loss)
-        
-    loss = (
-        config.data_coarse_loss_mult * sum(data_losses[:-1]) +
-        config.data_loss_mult * data_losses[-1]
-    )
-    return config.conceal_ssim_mult * loss
-    
-
-def luminance_variance_loss(renderings, config, alpha=1):
-    data_losses = []
-    for rendering in renderings:
-        if 'light_rgb' not in rendering:
-            continue
-        light_rgb = rendering['light_rgb'] # [batch_size, 1, 1, 3]
-        # RGB to Luminance (using NTSC formula)
-        luminance_weights = torch.tensor([0.333, 0.333, 0.333], dtype=torch.float32).to(light_rgb.device)
-        pred_luminance = torch.sum(light_rgb * luminance_weights, dim=-1, keepdim=True)
-        mean_luminance = torch.mean(pred_luminance, dim=0, keepdim=True)
-        var_loss = torch.var(pred_luminance, dim=0, unbiased=False)
-        mean_loss = torch.pow(torch.mean((mean_luminance - config.luminance_mean)), 2)
-        data_loss = mean_loss + alpha * var_loss
-        data_losses.append(data_loss)
-
-    loss = (
-        config.data_coarse_loss_mult * sum(data_losses[:-1]) +
-        config.data_loss_mult * data_losses[-1]
-    )
-    return config.conceal_luminance_var_mult * loss
+    last_rendering = renderings[-1]
+    light_rgb = last_rendering['light_rgb'] # [batch_size, 1, 1, 3]
+    input_rgb = batch['rgb'][..., :3]
+    loss = s3im_func(light_rgb, input_rgb)
+    return config.absorb_ssim_mult * loss
 
 
-def acc_loss(renderings, config):
+def acc_loss(ray_history, config):
     """
     transmittance loss on object to enforce either zero or one,
     eliminating transparence.
     """
     beta = config.bs_acc_factor
-    last_renderings = renderings[-1]
-    obj_trans = last_renderings['full_trans']
+    last_ray_results = ray_history[-1]
+    obj_trans = last_ray_results['full_trans']
     P = torch.exp(-torch.abs(obj_trans) / 0.1) + beta * torch.exp(
         -torch.abs(1 - obj_trans) / 0.1
     )
@@ -394,8 +386,9 @@ def clip_gradients(model, accelerator, config):
     if config.grad_max_val > 0 and accelerator.sync_gradients:
         accelerator.clip_grad_value_(model.parameters(), config.grad_max_val)
 
-    for param in model.parameters():
-        param.grad.nan_to_num_()
+    for name, param in model.named_parameters():
+        if param.grad is not None:
+            param.grad.nan_to_num_()
 
 
 def create_optimizer(config: configs.Config, model):

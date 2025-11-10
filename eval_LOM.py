@@ -3,10 +3,8 @@ import os
 import sys
 import time
 import accelerate
-import gin
-import numpy as np
-import torch
 from absl import app
+import gin
 from internal import configs
 from internal import datasets
 from internal import image
@@ -17,7 +15,11 @@ from internal import train_utils
 from internal import checkpoints
 from internal import utils
 from internal import vis
+import numpy as np
+import torch
+# import tensorboardX
 from torch.utils._pytree import tree_map
+
 configs.define_common_flags()
 
 
@@ -53,9 +55,7 @@ def summarize_results(folder, scene_names, num_buckets):
 
 def main(unused_argv):
     config = configs.load_config()
-    # TODO：： change this!
-    # config.exp_path = os.path.join('exp', config.exp_name)
-    config.exp_path = os.path.join('legacy_exp', config.exp_name)
+    config.exp_path = os.path.join('exp', config.exp_name)
     config.checkpoint_dir = os.path.join(config.exp_path, 'checkpoints')
     config.render_dir = os.path.join(config.exp_path, 'render')
 
@@ -100,6 +100,7 @@ def main(unused_argv):
         cc_fun = image.color_correct
 
     model = accelerator.prepare(model)
+
     metric_harness = image.MetricHarness()
 
     last_step = 0
@@ -107,6 +108,9 @@ def main(unused_argv):
                            'path_renders' if config.render_path else 'test_preds')
     path_fn = lambda x: os.path.join(out_dir, x)
 
+    # if not config.eval_only_once:
+    #     summary_writer = tensorboardX.SummaryWriter(
+    #         os.path.join(config.exp_path, 'eval'))
     while True:
         step = checkpoints.restore_checkpoint(config.checkpoint_dir, accelerator, logger)
         if step <= last_step:
@@ -141,7 +145,7 @@ def main(unused_argv):
             logger.info(f'Rendered in {render_times[-1]:0.3f}s')
 
             cc_start_time = time.time()
-            rendering['rgb_cc'] = cc_fun(rendering['rgb'].cuda(), batch['rgb'])
+            rendering['light_rgb_cc'] = cc_fun(rendering['light_rgb'].cuda(), batch['rgb'])
 
             rendering = tree_map(lambda x: x.detach().cpu().numpy() if x is not None else None, rendering)
             batch = tree_map(lambda x: x.detach().cpu().numpy() if x is not None else None, batch)
@@ -153,8 +157,8 @@ def main(unused_argv):
                 showcase_idx = idx if config.deterministic_showcase else len(showcases)
                 showcases.append((showcase_idx, rendering, batch))
             if not config.render_path:
-                rgb = postprocess_fn(rendering['rgb'])
-                rgb_cc = postprocess_fn(rendering['rgb_cc'])
+                rgb = postprocess_fn(rendering['light_rgb'])
+                rgb_cc = postprocess_fn(rendering['light_rgb_cc'])
                 rgb_gt = postprocess_fn(gt_rgb)
 
                 if config.eval_quantize_metrics:
@@ -196,30 +200,52 @@ def main(unused_argv):
 
             if config.eval_save_output and (config.eval_render_interval > 0):
                 if (idx % config.eval_render_interval) == 0:
-                    utils.save_img_u8(postprocess_fn(rendering['rgb']),
+                    utils.save_img_u8(postprocess_fn(rendering['light_rgb']),
                                       path_fn(f'color_{idx:03d}.png'))
-                    utils.save_img_u8(postprocess_fn(rendering['rgb_cc']),
+                    utils.save_img_u8(postprocess_fn(rendering['light_rgb_cc']),
                                       path_fn(f'color_cc_{idx:03d}.png'))
-                    
-                    vis_suite = vis.visualize_suite(rendering, batch)
-                    utils.save_img_u8(vis_suite['vertical_depth'],
-                                      path_fn(f'vertical_depth_{idx:03d}.png'))
-                    utils.save_img_u8(vis_suite['depth_median'],
-                                      path_fn(f'horiz_depth_{idx:03d}.png'))
-                    
-                    # for key in ['distance_mean', 'distance_median']:
-                    #     if key in rendering:
-                    #         utils.save_img_f32(rendering[key],
-                    #                            path_fn(f'{key}_{idx:03d}.tiff'))
 
-                    # for key in ['normals']:
-                    #     if key in rendering:
-                    #         utils.save_img_u8(rendering[key] / 2. + 0.5,
-                    #                           path_fn(f'{key}_{idx:03d}.png'))
-                    # utils.save_img_f32(rendering['acc'], path_fn(f'acc_{idx:03d}.tiff'))
+                    utils.save_img_f32(rendering['acc'], path_fn(f'acc_{idx:03d}.tiff'))
 
-        if (config.eval_save_output and (not config.render_path) and 
-            accelerator.is_main_process):
+        # if (not config.eval_only_once) and accelerator.is_main_process:
+        #     summary_writer.add_scalar('eval_median_render_time', np.median(render_times),
+        #                               step)
+        #     for name in metrics[0]:
+        #         scores = [m[name] for m in metrics]
+        #         summary_writer.add_scalar('eval_metrics/' + name, np.mean(scores), step)
+        #         summary_writer.add_histogram('eval_metrics/' + 'perimage_' + name, scores,
+        #                                      step)
+        #     for name in metrics_cc[0]:
+        #         scores = [m[name] for m in metrics_cc]
+        #         summary_writer.add_scalar('eval_metrics_cc/' + name, np.mean(scores), step)
+        #         summary_writer.add_histogram('eval_metrics_cc/' + 'perimage_' + name,
+        #                                      scores, step)
+
+        #     for i, r, b in showcases:
+        #         if config.vis_decimate > 1:
+        #             d = config.vis_decimate
+        #             decimate_fn = lambda x, d=d: None if x is None else x[::d, ::d]
+        #         else:
+        #             decimate_fn = lambda x: x
+        #         r = tree_map(decimate_fn, r)
+        #         b = tree_map(decimate_fn, b)
+        #         visualizations = vis.visualize_suite(r, b)
+        #         for k, v in visualizations.items():
+        #             if k == 'color':
+        #                 v = postprocess_fn(v)
+        #             summary_writer.add_image(f'output_{k}_{i}', tb_process_fn(v), step)
+        #         if not config.render_path:
+        #             target = postprocess_fn(b['rgb'])
+        #             summary_writer.add_image(f'true_color_{i}', tb_process_fn(target), step)
+        #             pred = postprocess_fn(visualizations['color'])
+        #             residual = np.clip(pred - target + 0.5, 0, 1)
+        #             summary_writer.add_image(f'true_residual_{i}', tb_process_fn(residual), step)
+        #             if config.compute_normal_metrics:
+        #                 summary_writer.add_image(f'true_normals_{i}', tb_process_fn(b['normals']) / 2. + 0.5,
+        #                                          step)
+
+        if (config.eval_save_output and (not config.render_path) and
+                accelerator.is_main_process):
             with utils.open_file(path_fn(f'render_times_{step}.txt'), 'w') as f:
                 f.write(' '.join([str(r) for r in render_times]))
             logger.info(f'metrics:')

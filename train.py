@@ -113,8 +113,7 @@ def main(unused_argv):
     metric_harness = image.MetricHarness()
     
     # SIEM model
-    s3im_func = utils.S3IM(config.luminance_mean).cuda()
-    local_struct_func = utils.Structure_Loss(config.luminance_mean * 15).cuda()
+    s3im_func = utils.S3IM(config.luminance_mean, config.contrast_factor).cuda()
 
     # wandb
     if accelerator.is_main_process:
@@ -165,8 +164,8 @@ def main(unused_argv):
                     batch,
                     train_frac=train_frac,
                     compute_extras=compute_extras,
-                    zero_glo=False)
-
+                    zero_glo=False,
+                    step=step)
 
             if step % 1000 == 0:
                 print("check")
@@ -175,10 +174,6 @@ def main(unused_argv):
             # supervised by data
             data_loss, stats = train_utils.compute_data_loss(batch, renderings, config)
             losses['data'] = data_loss
-
-            # interlevel loss in MipNeRF360
-            if config.interlevel_loss_mult > 0 and not module.single_mlp:
-                losses['interlevel'] = train_utils.interlevel_loss(ray_history, config)
 
             # interlevel loss in ZipNeRF360
             if config.anti_interlevel_loss_mult > 0 and not module.single_mlp:
@@ -191,36 +186,24 @@ def main(unused_argv):
             # opacity loss
             if config.opacity_loss_mult > 0:
                 losses['opacity'] = train_utils.opacity_loss(renderings, config)
+                
+            if config.enable_depth_prior and config.depth_multi > 0:
+                losses['depth'] = train_utils.object_depth_loss(batch, renderings, config)
 
-            # orientation loss in RefNeRF
-            if (config.orientation_coarse_loss_mult > 0 or
-                    config.orientation_loss_mult > 0):
-                losses['orientation'] = train_utils.orientation_loss(batch, module, ray_history,
-                                                                     config)
-            if config.enable_media_scatter and config.bs_acc_mult > 0:
-                losses['object_acc'] = train_utils.acc_loss(renderings, config)
-                
-            # if config.enable_conceal and config.conceal_luminance_mult > 0:
-            #     losses['luminance'] = train_utils.luminance_loss(renderings, config)
-                
-            # if config.enable_conceal and config.conceal_local_structure_mult > 0:
-            #     losses['local_structure'] = train_utils.local_contrast_loss(local_struct_func,
-            #                                                                 batch, renderings, config)
+            if config.enable_scatter and config.bs_acc_mult > 0:
+                losses['object_acc'] = train_utils.acc_loss(ray_history, config)
             
-            if config.enable_conceal and config.conceal_ssim_mult > 0:
+            if (config.enable_scatter or config.enable_absorb) and config.media_overlap_multi > 0:
+                losses['overlap'] = train_utils.min_overlap_loss(renderings, config)
+            
+            if config.enable_absorb and config.media_monotonic_multi > 0:
+                losses['monotonic_media'] = train_utils.media_monotonic_loss(renderings, config)
+                
+            if config.enable_absorb and config.absorb_ssim_mult > 0:
                 losses['ssim'] = train_utils.similarity_loss(s3im_func, batch, renderings, config)
-                
-            # if config.enable_conceal and config.conceal_luminance_var_mult > 0:
-            #     losses['var_luminance'] = train_utils.luminance_variance_loss(renderings, config)
             
-            # if config.enable_conceal and config.conceal_trans_multi > 0:
-            #     losses['conceal_trans'] = train_utils.conceal_trans_loss(batch, renderings, config)
-                
-            if config.enable_conceal and config.conceal_pesudo_multi > 0:
-                losses['pesudo_enhanced'] = train_utils.conceal_pesudo_loss(batch, renderings, config)
-                
-            # if config.enable_conceal and config.conceal_color_consist_mult > 0:
-            #     losses['color_consist'] = train_utils.color_consist_loss(renderings, config)
+            if config.enable_absorb and config.absorb_trans_multi > 0:
+                losses['absorb_trans'] = train_utils.absorb_trans_loss(batch, renderings, ray_history, config)
                 
             # hash grid l2 weight decay
             if config.hash_decay_mults > 0:
@@ -285,13 +268,12 @@ def main(unused_argv):
                     summ_fn_wandb('train/learning_rate', learning_rate, step)
                     summ_fn_wandb('train/steps_per_sec', steps_per_sec, step)
                     summ_fn_wandb('train/rays_per_sec', rays_per_sec, step)
-
                     summ_fn_wandb('train/avg_psnr_timed', avg_stats['psnr'], step)
                     summ_fn_wandb('train/avg_psnr_timed_approx', avg_stats['psnr'], step)
                     
-                    if config.enable_conceal:
-                        avg_conceal_density = torch.mean(renderings[-1]['sigma_conceal'].detach()).item()
-                        summ_fn_wandb('train/avg_conceal_density', avg_conceal_density, step)
+                    if config.enable_absorb:
+                        avg_absorb_density = torch.mean(renderings[-1]['sigma_absorb'].detach()).item()
+                        summ_fn_wandb('train/avg_absorb_density', avg_absorb_density, step)
 
                     if dataset.metadata is not None and module.learned_exposure_scaling:
                         scalings = module.exposure_scaling_offsets.weight
@@ -358,8 +340,9 @@ def main(unused_argv):
                     summ_fn_wandb('test/rays_per_sec', rays_per_sec, step)
 
                     metric_start_time = time.time()
+                    eval_rendering = rendering['light_rgb'] if config.enable_absorb else rendering['rgb']
                     metric = metric_harness(
-                        postprocess_fn(rendering['rgb']), postprocess_fn(test_batch['rgb']))
+                        postprocess_fn(eval_rendering), postprocess_fn(test_batch['rgb']))
                     logger.info(f'Eval {step}: {eval_time:0.3f}s, {rays_per_sec:0.0f} rays/sec')
                     logger.info(f'Metrics computed in {(time.time() - metric_start_time):0.3f}s')
                     for name, val in metric.items():
@@ -378,37 +361,20 @@ def main(unused_argv):
                     vis_suite = vis.visualize_suite(rendering, test_batch)
                     with tqdm.external_write_mode():
                         logger.info(f'Visualized in {(time.time() - vis_start_time):0.3f}s')
-                    if config.rawnerf_mode:
-                        # Unprocess raw output.
-                        vis_suite['color_raw'] = rendering['rgb']
-                        # Autoexposed colors.
-                        vis_suite['color_auto'] = postprocess_fn(rendering['rgb'], None)
-                        summ_fn_wandb('test/true_auto', wandb.Image(postprocess_fn(test_batch['rgb'], None)), step)
-
-                        # Exposure sweep colors.
-                        exposures = test_dataset.metadata['exposure_levels']
-                        for p, x in list(exposures.items()):
-                            vis_suite[f'exposure_{p}'] = postprocess_fn(rendering['rgb'], x)
-                            summ_fn_wandb(f'test/true_color_{p}', wandb.Image(postprocess_fn(test_batch['rgb'], x)), step)
-                    
+                        
                     summ_fn_wandb(f'test/true_color', wandb.Image(test_batch['rgb']), step)        
                     if config.compute_normal_metrics:
                         summ_fn_wandb(f'test/true_normals', wandb.Image(test_batch['normals'] / 2. + 0.5), step)
     
-                    if config.enable_conceal:
+                    if config.enable_absorb:
                         vis_suite['light_rgb'] = rendering['light_rgb']
-                    if config.enable_media_scatter:
-                        vis_suite['color'] = rendering['rgb']
+                    if config.enable_scatter:
                         vis_suite['J'] = rendering['J']
                         vis_suite['bs_rgb'] = rendering['bs_rgb']
                         vis_suite['c_med'] =  np.mean(rendering['c_med'], axis=2)
-                        vis_suite['sigma_bs'] = np.mean(rendering['sigma_bs'], axis=2)
-                        vis_suite['sigma_atten'] = np.mean(rendering['sigma_atten'], axis=2)
-                    if config.enable_media_scatter and config.enable_conceal:
-                        vis_suite['light_rgb'] = rendering['light_rgb']
-                        vis_suite['light_J'] = rendering['light_J']
-                        vis_suite['light_bs_rgb'] = rendering['light_bs_rgb']
-    
+                        vis_suite['sigma_bs'] = np.mean(rendering['sigma_bs'], axis=2).squeeze()
+                        vis_suite['sigma_atten'] = np.mean(rendering['sigma_atten'], axis=2).squeeze()
+                        
                     for k, v in vis_suite.items():
                         summ_fn_wandb(f'test/output_{k}', wandb.Image(np.asarray(v)), step)
                         utils.save_img_u8(np.asarray(v), os.path.join(config.exp_path, f'{k}_{step}.png'))

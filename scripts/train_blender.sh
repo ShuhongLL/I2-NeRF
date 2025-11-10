@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCENE=bike
-EXPERIMENT=blender_pesudo_ssim/"$SCENE"
+EXPERIMENT=blender/"$SCENE"
 DATA_ROOT=/data/umihebi0/users/shuhong/LOM_full
 DATA_DIR="$DATA_ROOT"/"$SCENE"
 

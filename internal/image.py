@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from internal import math
 from skimage.metrics import structural_similarity, peak_signal_noise_ratio
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 import cv2
 
 
@@ -110,7 +111,9 @@ def color_correct(img, ref, num_iters=5, eps=0.5 / 255):
 
 class MetricHarness:
     """A helper class for evaluating several error metrics."""
-
+    def __init__(self):
+        self.lpips_metric = LearnedPerceptualImagePatchSimilarity(normalize=True).cuda()
+    
     def __call__(self, rgb_pred, rgb_gt, name_fn=lambda s: s):
         """Evaluate the error between a predicted rgb image and the true image."""
         rgb_pred = (rgb_pred * 255).astype(np.uint8)
@@ -119,8 +122,11 @@ class MetricHarness:
         rgb_gt_gray = cv2.cvtColor(rgb_gt, cv2.COLOR_RGB2GRAY)
         psnr = float(peak_signal_noise_ratio(rgb_pred, rgb_gt, data_range=255))
         ssim = float(structural_similarity(rgb_pred_gray, rgb_gt_gray, data_range=255))
+        lpips = float(self.lpips_metric(torch.from_numpy(rgb_pred/255.0).permute(2, 0, 1).unsqueeze(0).float().cuda(),
+                                        torch.from_numpy(rgb_gt/255.0).permute(2, 0, 1).unsqueeze(0).float().cuda()))
 
         return {
             name_fn('psnr'): psnr,
             name_fn('ssim'): ssim,
+            name_fn('lpips'): lpips,
         }

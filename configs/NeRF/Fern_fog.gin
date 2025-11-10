@@ -1,4 +1,4 @@
-Config.project_name = 'media-nerf'
+COnfig.project_name = 'media-nerf'
 Config.dataset_loader = 'llff'
 Config.near = 0.
 Config.far = 1.
@@ -6,11 +6,12 @@ Config.factor = 0
 Config.forward_facing = True
 Config.adam_eps = 1e-8
 Config.data_loss_type = 'rawnerf'
-Config.enable_scatter = False
-Config.enable_absorb = True
-Config.batch_size = 2048
-Config.absorb_luminance_mult = 0.05
-Config.pixel_mean = 0.45
+Config.enable_scatter = True
+Config.enable_spatial_media = False
+Config.batch_size = 1024
+Config.enable_depth_prior = True
+Config.depth_multi = 0.1
+Config.enable_downwell_depth = True
 
 Model.opaque_background = False
 Model.num_levels = 2

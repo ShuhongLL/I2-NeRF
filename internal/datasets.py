@@ -243,7 +243,8 @@ class Dataset(torch.utils.data.Dataset):
         self._num_border_pixels_to_mask = config.num_border_pixels_to_mask
         self._apply_bayer_mask = config.apply_bayer_mask
         self._render_spherical = False
-        self._load_bcp = config.use_bright_channel_prior
+        self._load_bcp = config.enable_bcp
+        self._load_depth = config.enable_depth_prior
         self._use_bcp_atmospheric_light = config.use_bcp_atmospheric_light
 
         self.config = config
@@ -261,6 +262,7 @@ class Dataset(torch.utils.data.Dataset):
         self.bcp_kernel_size = config.bcp_kernel_size
         self.bcp_trans = None
         self.bcp_enhanced = None
+        self.depths = None
         self.poses = None
         self.pixtocam_ndc = None
         self.metadata = None
@@ -407,6 +409,8 @@ class Dataset(torch.utils.data.Dataset):
         if self._load_bcp:
             batch['bcp_trans'] = self.bcp_trans[cam_idx, pix_y_int, pix_x_int]
             batch['bcp_enhanced'] = self.bcp_enhanced[cam_idx, pix_y_int, pix_x_int]
+        if self._load_depth:
+            batch['depths'] = self.depths[cam_idx, pix_y_int, pix_x_int]
         return {k: torch.from_numpy(v.copy()).float() if v is not None else None for k, v in batch.items()}
 
     def _next_train(self, item):
@@ -483,6 +487,7 @@ class Blender(Dataset):
         normal_images = []
         bcp_trans = []
         bcp_enhanced = []
+        depths = []
         cams = []
         for idx, frame in enumerate(tqdm(meta['frames'], desc='Loading Blender dataset', disable=self.global_rank != 0, leave=False)):
             fprefix = os.path.join(self.data_dir, frame['file_path'])
@@ -508,19 +513,13 @@ class Blender(Dataset):
                 normal_image = get_img('_normal.png')[..., :3] * 2. / 255. - 1.
                 normal_images.append(normal_image)
             if self._load_bcp:
-                bright = utils.cal_bright_channel(image, self.bcp_kernel_size)
-                if self._use_bcp_atmospheric_light:
-                    A = utils.estimate_atmospheric_light(image, bright)
-                else:
-                    A = np.zeros(3) + 1e-3
-                trans = utils.calculate_transmission(image, A, self.bcp_kernel_size)
-                trans_min = utils.calcualte_min_transmission(image, A)
-                trans_min = np.clip(trans_min, 0.1, 1)
-                refined_trans = utils.guided_filter(image[:, :, 0], trans, r=self.bcp_kernel_size, eps=1e-3)
-                refined_trans = np.clip(refined_trans, trans_min, 1)[..., None] # [h, w, 1]
-                J = (image - A[None, None,:]) / refined_trans + A[None, None,:] # [h, w, 3]
-                bcp_trans.append(refined_trans)
+                J, illum_map = utils.load_bcp(image, self.bcp_kernel_size, self._use_bcp_atmospheric_light)
                 bcp_enhanced.append(J)
+                bcp_trans.append(illum_map)
+            if self._load_depth:
+                basename = os.path.splitext(os.path.basename(fprefix))[0]
+                depth = get_img(os.path.join(self.data_dir, 'depth', f'{basename}.png')) / 255.
+                depths.append(depth)
                 
             cams.append(np.array(frame['transform_matrix'], dtype=np.float32))
 
@@ -533,6 +532,8 @@ class Blender(Dataset):
         if self._load_bcp:
             self.bcp_trans = np.stack(bcp_trans, axis=0)
             self.bcp_enhanced = np.stack(bcp_enhanced, axis=0)
+        if self._load_depth:
+            self.depths = np.stack(depths, axis=0)
 
         if self.images.shape[-1] == 4:
             rgb, alpha = self.images[..., :3], self.images[..., -1:]
@@ -688,6 +689,22 @@ class LLFF(Dataset):
                 shutters = gather_exif_value('ExposureTime')
                 isos = gather_exif_value('ISOSpeedRatings')
                 self.exposures = shutters * isos / 1000.
+                
+        if config.enable_depth_prior:
+            depths = [utils.load_img(os.path.join(self.data_dir, 'depth', image_name.split('.')[0] + '.png')) \
+                for image_name in image_names]
+            depths = np.stack(depths, axis=0) / 255.
+            self.depths = depths
+            
+        if self._load_bcp:
+            bcp_enhanced = []
+            bcp_trans = []
+            for image in images:
+                J, bcp_tran = utils.load_bcp(image, self.bcp_kernel_size, self._use_bcp_atmospheric_light)
+                bcp_enhanced.append(J)
+                bcp_trans.append(bcp_tran)
+            self.bcp_enhanced = np.stack(bcp_enhanced, axis=0)
+            self.bcp_trans = np.stack(bcp_trans, axis=0)
 
         if raw_testscene:
             # For raw testscene, the first image sent to COLMAP has the same pose as
@@ -716,7 +733,6 @@ class TanksAndTemplesNerfPP(Dataset):
 
         basedir = os.path.join(self.data_dir, split_str)
 
-        # TODO: need to rewrite this to put different data on different rank
         def load_files(dirname, load_fn, shape=None):
             files = [
                 os.path.join(basedir, dirname, f)

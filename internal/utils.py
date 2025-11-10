@@ -141,54 +141,64 @@ def create_window(window_size, channel):
     return window
 
 
-# def _ssim(rendered, target, window, window_size, channel, target_mean, size_average=True, stride=None, contrast_factor=10):
-#     mu1 = F.conv2d(rendered, window, padding=(window_size-1)//2, groups=channel, stride=stride)
-#     mu2_original = F.conv2d(target, window, padding=(window_size-1)//2, groups=channel, stride=stride)
+def _ssim(rendered, target, window, window_size, channel, desired_mean, contrast_factor, size_average=True, stride=None):
+    """
+    Compute SSIM between rendered and target images, but compensate the target's
+    local luminance and contrast (variance) on the fly. The idea is to linearly transform 
+    the target's local mean and variance to match the desired normal-light conditions.
     
-#     bias = (target_mean - torch.mean(mu2_original))
-#     mu2 = mu2_original + bias
-
-#     mu1_sq = mu1.pow(2)
-#     mu2_sq = mu2.pow(2)
-#     mu1_mu2 = mu1 * mu2
-
-#     sigma1_sq = F.conv2d(rendered * rendered, window, padding=(window_size-1)//2, groups=channel, stride=stride) - mu1_sq
-#     sigma2_sq = contrast_factor * (F.conv2d(target * target, window, padding=(window_size-1)//2, groups=channel, stride=stride) - mu2_original.pow(2))
-
-#     sigma12 = contrast_factor**0.5 * (F.conv2d(rendered * target, window, padding=(window_size-1)//2, groups=channel, stride=stride) - mu1 * mu2_original)
-
-#     C1 = 0.01**2
-#     C2 = 0.03**2
-
-#     ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
-
-#     if size_average:
-#         return ssim_map.mean()
-#     else:
-#         return ssim_map.mean(1).mean(1).mean(1)
-    
-    
-def _ssim(rendered, target, window, window_size, channel, desired_mean, size_average=True, stride=None, contrast_factor=10):
-    # centered_target = target - torch.mean(target)
-    # target= centered_target * contrast_factor + desired_mean
-    # target = torch.clip(target, 0, 1)
-    
+    Parameters:
+      rendered       : The output image from your network (assumed to be "normal-light")
+      target         : The low-light input image
+      window         : The convolution window (e.g., a Gaussian kernel) for local statistics
+      window_size    : The size (assumed square) of the window
+      channel        : The number of channels in the images
+      desired_mean   : The desired global mean for a normal-light image (e.g., 0.5 for [0,1] images)
+      contrast_factor: A scaling factor to boost the contrast of the target. 
+                       (The target’s variance is multiplied by contrast_factor^2.)
+      size_average   : Whether to average the resulting SSIM map
+      stride         : Stride to use in convolution (if any)
+      
+    Returns:
+      The (compensated) SSIM value.
+    """
+    # Compute local means with convolution
     mu1 = F.conv2d(rendered, window, padding=window_size//2, groups=channel, stride=stride)
     mu2 = F.conv2d(target, window, padding=window_size//2, groups=channel, stride=stride)
+    
+
+    global_target_mean = target.mean()
+    # Adjust (compensate) target's local mean:
+    # This simulates converting the low-light target to the desired normal-light levels.
+    mu2_comp = (mu2 - global_target_mean) * contrast_factor + desired_mean
 
     mu1_sq = mu1.pow(2)
-    mu2_sq = mu2.pow(2)
-    mu1_mu2 = mu1 * mu2
-
+    mu2_comp_sq = mu2_comp.pow(2)
+    
     sigma1_sq = F.conv2d(rendered * rendered, window, padding=window_size//2, groups=channel, stride=stride) - mu1_sq
-    sigma2_sq = F.conv2d(target * target, window, padding=window_size//2, groups=channel, stride=stride) - mu2_sq
-    sigma12 = F.conv2d(rendered * target, window, padding=window_size//2, groups=channel, stride=stride) - mu1_mu2
+    # Compute local variance for target image using its original local mean.
+    # Note: sigma2_sq = E[target^2] - (mu2)^2.
+    sigma2_sq = F.conv2d(target * target, window, padding=window_size//2, groups=channel, stride=stride) - F.conv2d(target, window, padding=window_size//2, groups=channel, stride=stride).pow(2)
+    # Adjust the target's local variance: variance scales by (contrast_factor)^2.
+    sigma2_sq_comp = sigma2_sq * (contrast_factor ** 2)
+    
+    # Compute local covariance between rendered and target.
+    # Standard formulation: sigma12 = E[rendered * target] - mu1 * mu2.
+    sigma12 = F.conv2d(rendered * target, window, padding=window_size//2, groups=channel, stride=stride) - mu1 * mu2
+    # Adjust the covariance: for a linear transform, covariance scales linearly with contrast_factor.
+    sigma12_comp = sigma12 * contrast_factor
 
+    # Constants for numerical stability (as in the original SSIM formulation)
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
 
-    ssim_map = ((2 * mu1_mu2 + C1)*(2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1)*(sigma1_sq + sigma2_sq + C2))
-
+    # Compute the luminance term using the compensated local mean
+    luminance = (2 * mu1 * mu2_comp + C1) / (mu1_sq + mu2_comp_sq + C1)
+    
+    # Compute the contrast-structure term using the compensated variance and covariance
+    contrast_structure = (2 * sigma12_comp + C2) / (sigma1_sq + sigma2_sq_comp + C2)
+    
+    ssim_map = luminance * contrast_structure
     if size_average:
         return ssim_map.mean()
     else:
@@ -196,7 +206,7 @@ def _ssim(rendered, target, window, window_size, channel, desired_mean, size_ave
 
 
 class SSIM(torch.nn.Module):
-    def __init__(self, target_mean, window_size = 3, size_average = True, stride=3):
+    def __init__(self, target_mean, contrast_factor, window_size = 3, size_average = True, stride=3):
         super(SSIM, self).__init__()
         self.window_size = window_size
         self.size_average = size_average
@@ -204,6 +214,7 @@ class SSIM(torch.nn.Module):
         self.stride = stride
         self.window = create_window(window_size, self.channel)
         self.target_mean = target_mean
+        self.contrast_factor = contrast_factor
 
     def forward(self, img1, img2):
         """
@@ -221,7 +232,8 @@ class SSIM(torch.nn.Module):
             self.window = window
             self.channel = channel
 
-        return _ssim(img1, img2, window, self.window_size, channel, self.target_mean, self.size_average, stride=self.stride)
+        return _ssim(img1, img2, window, self.window_size, channel, self.target_mean,
+                     self.contrast_factor, self.size_average, stride=self.stride)
 
 
 def ssim(img1, img2, window_size = 11, size_average = True):
@@ -247,12 +259,13 @@ class S3IM(torch.nn.Module):
         patch_height (height): height of virtual patch(default: 64)
         patch_width (height): width of virtual patch(default: 64)
     """
-    def __init__(self, target_mean, kernel_size=4, stride=4, repeat_time=10):
+    def __init__(self, target_mean, contrast_factor, kernel_size=4, stride=4, repeat_time=10):
         super(S3IM, self).__init__()
         self.kernel_size = kernel_size
         self.stride = stride
         self.repeat_time = repeat_time
-        self.ssim_loss = SSIM(target_mean, window_size=self.kernel_size, stride=self.stride)
+        self.ssim_loss = SSIM(target_mean, contrast_factor, window_size=self.kernel_size,
+                              stride=self.stride)
         
     def forward(self, src_vec, tar_vec):
         src_vec = src_vec.squeeze() # [batch_size, 1, 1, 3] -> [batch_size, 3]
@@ -302,6 +315,21 @@ class Structure_Loss(torch.nn.Module):
         D_right = torch.pow(self.contrast * target_right - rendered_right, 2)
         
         return torch.mean(D_left + D_right)
+    
+
+def load_bcp(image, bcp_kernel_size=7, use_atmospheric_light=False):
+    bright = cal_bright_channel(image, bcp_kernel_size)
+    if use_atmospheric_light:
+        A = estimate_atmospheric_light(image, bright)
+    else:
+        A = np.zeros(3) + 1e-3
+    trans = calculate_transmission(image, A, bcp_kernel_size)
+    trans_min = calcualte_min_transmission(image, A)
+    trans_min = np.clip(trans_min, 0.1, 1)
+    refined_trans = guided_filter(image[:, :, 0], trans, r=bcp_kernel_size, eps=1e-3)
+    refined_trans = np.clip(refined_trans, trans_min, 1)[..., None] # [h, w, 1]
+    J = (image - A[None, None,:]) / refined_trans + A[None, None,:] # [h, w, 3]
+    return J, refined_trans
 
 
 def cal_bright_channel(I, patch_size=5):

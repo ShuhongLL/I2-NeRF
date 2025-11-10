@@ -9,11 +9,14 @@ import glob
 def restore_checkpoint(
         checkpoint_dir,
         accelerator: accelerate.Accelerator,
-        logger=None
+        logger=None,
+        path=None
 ):
     dirs = glob.glob(os.path.join(checkpoint_dir, "*"))
     dirs.sort()
-    path = dirs[-1] if len(dirs) > 0 else None
+    if path is None:
+        path = dirs[-1] if len(dirs) > 0 else None
+        
     if path is None:
         if logger is not None:
             logger.info("Checkpoint does not exist. Starting a new training run.")
@@ -21,7 +24,7 @@ def restore_checkpoint(
     else:
         if logger is not None:
             logger.info(f"Resuming from checkpoint {path}")
-        accelerator.load_state(path)
+        accelerator.load_state(path, strict=True)
         init_step = int(os.path.basename(path))
     return init_step
 

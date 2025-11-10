@@ -26,7 +26,7 @@ class Config:
     seed = 0
     dataset_loader: str = 'llff'  # The type of dataset loader to use.
     batching: str = 'all_images'  # Batch composition, [single_image, all_images].
-    batch_size: int = 2 ** 9  # The number of rays/pixels in each batch.
+    batch_size: int = 2 ** 14  # The number of rays/pixels in each batch.
     patch_size: int = 1  # Resolution of patches sampled for training batches.
     factor: int = 4  # The downsample factor of images, 0 for no downsampling.
     multiscale: bool = False  # use multiscale data for training.
@@ -35,14 +35,14 @@ class Config:
     forward_facing: bool = False  # Set to True for forward-facing LLFF captures.
     render_path: bool = False  # If True, render a path. Used only by LLFF.
     llffhold: int = 8  # Use every Nth image for the test set. Used only by LLFF.
-    # If true, use all input images for training.
-    llff_use_all_images_for_training: bool = False
+    llff_use_all_images_for_training: bool = True
     llff_use_all_images_for_testing: bool = False
     use_tiffs: bool = False  # If True, use 32-bit TIFFs. Used only by Blender.
     compute_disp_metrics: bool = False  # If True, load and compute disparity MSE.
     compute_normal_metrics: bool = False  # If True, load and compute normal MAE.
-    use_bright_channel_prior: bool = False # If True, use bright channel prior.
+    enable_bcp: bool = False # If True, use bright channel prior.
     use_bcp_atmospheric_light: bool = False # If True, use bright channel prior to sample the dark atmospheric light
+    enable_depth_prior: bool = False
     bcp_kernel_size: int = 5 # Kenerl size for local bright channel.
     disable_multiscale_loss: bool = False  # If True, disable multiscale loss.
     randomized: bool = True  # Use randomized stratified sampling.
@@ -52,7 +52,7 @@ class Config:
     project_name: str = "media-nerf" # project name for wandb
     data_dir: Optional[str] = "/SSD_DISK/datasets/360_v2/bicycle"  # Input data directory.
     vocab_tree_path: Optional[str] = None  # Path to vocab tree for COLMAP.
-    render_chunk_size: int = 65536  # Chunk size for whole-image renderings.
+    render_chunk_size: int = 2 ** 14  # Chunk size for whole-image renderings.
     num_showcase_images: int = 5  # The number of test-set images to showcase.
     deterministic_showcase: bool = True  # If True, showcase the same images.
     vis_num_rays: int = 16  # The number of rays to visualize.
@@ -71,7 +71,7 @@ class Config:
     checkpoints_total_limit: int = 1
     gradient_scaling: bool = False  # If True, scale gradients as in https://gradient-scaling.github.io/.
     print_every: int = 100  # The number of steps between reports to tensorboard.
-    train_render_every: int = 1000 # Steps between test set renders when training
+    train_render_every: int = 500 # Steps between test set renders when training
     data_loss_type: str = 'charb'  # What kind of loss to use ('mse' or 'charb').
     charb_padding: float = 0.001  # The padding used for Charbonnier loss.
     data_loss_mult: float = 1.0  # Mult for the finest data term in the loss.
@@ -168,24 +168,31 @@ class Config:
     truncation_margin: float = 5.0
     tsdf_max_radius: float = 10.0  # in world space
     
+    data_loss_mult: float = 1.0
+    
+    # depth
+    depth_multi: float = 0.0
+    media_overlap_multi: float = 0
+    media_monotonic_multi: float = 0
+    overlap_threshold: float = 0.2
+    
     # scattering media
-    enable_media_scatter: bool = False
-    constant_media: bool = True
+    enable_spatial_media: bool = False
+    enable_scatter: bool = False
     extra_samples: bool = False
     bs_acc_factor: float = 1
     bs_acc_mult: float = 0
+    consistent_attenuation: float = False
+    enable_downwell_depth: float = False
+    bs_reg_mult: float = 0
     
-    # conceal field
-    enable_conceal: bool = False
-    conceal_luminance_mult: float = 0
-    conceal_local_structure_mult: float = 0
-    conceal_color_consist_mult: float = 0
-    conceal_luminance_var_mult: float = 0
-    conceal_ssim_mult: float = 0
-    conceal_trans_multi: float = 0
-    conceal_pesudo_multi: float = 0
-    # pixel_mean: float = 0
+    # absorb field
+    enable_absorb: bool = False
+    absorb_color_consist_mult: float = 0
+    absorb_ssim_mult: float = 0
+    absorb_trans_multi: float = 0
     luminance_mean: float = 0
+    contrast_factor: float = 0
     
 
 def define_common_flags():

@@ -205,7 +205,7 @@ def cast_rays(tdist, origins, directions, cam_dirs, radii, rand=True, n=7, m=3, 
 #     return weights, alpha, trans
 
 
-def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_conceal, tdist,
+def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_absorb, tdist,
                           dirs, extra_samples=False, opaque_background=False):
     t_delta = tdist[..., 1:] - tdist[..., :-1]
     delta = t_delta * torch.norm(dirs[..., None, :], dim=-1)
@@ -228,7 +228,7 @@ def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_conceal, tdist
     
     bs_trans = None
     atten_trans = None
-    conceal_trans = None
+    absorb_trans = None
     bs_weights = None
     
     # Extra sampling before the first point of tdist.
@@ -253,12 +253,12 @@ def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_conceal, tdist
     else:
         media_delta = t_delta.detach() * torch.norm(dirs[..., None, :], dim=-1)
         
-    # Conceal field
-    if sigma_conceal is not None:
-        conceal_density_delta = sigma_conceal * media_delta[..., None]
-        conceal_trans = torch.exp(-torch.cat([
-            torch.zeros_like(conceal_density_delta[..., :1, :]),
-            torch.cumsum(conceal_density_delta[..., :-1, :], dim=-2)
+    # absorb field
+    if sigma_absorb is not None:
+        absorb_density_delta = sigma_absorb * media_delta[..., None]
+        absorb_trans = torch.exp(-torch.cat([
+            torch.zeros_like(absorb_density_delta[..., :1, :]),
+            torch.cumsum(absorb_density_delta[..., :-1, :], dim=-2)
         ], dim=-2))
     
     # Scatter media
@@ -288,10 +288,10 @@ def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_conceal, tdist
 
         bs_weights = bs_alpha * bs_trans
  
-    return obj_weights, bs_weights, obj_trans, bs_trans, atten_trans, conceal_trans
+    return obj_weights, bs_weights, obj_trans, bs_trans, atten_trans, absorb_trans
 
 
-def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_trans, conceal_trans,
+def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_trans, absorb_trans,
                          tdist, bg_rgbs, t_far, compute_extras, extras=None, extra_samples=False):
     """Volumetric Rendering Function.
 
@@ -302,7 +302,7 @@ def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_tra
         bs_weights: medium's (additive component) weights, [batch_size, num_samples, 3].
         full_trans: full transmittance of object including the extra samples if exist, [batch_size, extra_samples+num_samples].
         trans_atten: medium's attenuation transmission,  exp(-sigma_atten*s_i) , [batch_size, num_samples, 3].
-        conceal_trans: concealing field's transmission, [batch_size, num_samples, 1].
+        absorb_trans: absorbing field's transmission, [batch_size, num_samples, 1].
         tdist: [batch_size, num_samples].
         bg_rgbs: the color(s) to use for the background.
         t_far: [batch_size, 1], the distance of the far plane.
@@ -313,7 +313,7 @@ def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_tra
         rendering: a dict containing an rgb image of size [batch_size, 3], and other
         visualizations if compute_extras=True.
     """
-    extra_sample_len = 33
+    extra_sample_len = 0
     eps = torch.finfo(rgbs.dtype).eps
     rendering = {}
 
@@ -323,19 +323,19 @@ def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_tra
     origin_rgb = (weights[..., None] * rgbs).sum(axis=-2)
     
     if bs_weights is None:
-        if conceal_trans is None:
+        if absorb_trans is None:
             # Original rendering
             rendering['rgb'] = origin_rgb
         else:
-            # Concealing field
-            rgb = (weights[..., None] * conceal_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
+            # absorbing field
+            rgb = (weights[..., None] * absorb_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
             rendering.update({
                 'rgb': rgb,
                 'light_rgb': origin_rgb,
-                'conceal_trans': conceal_trans
+                'absorb_trans': absorb_trans
             })
     else:
-        if conceal_trans is None:
+        if absorb_trans is None:
             # Scatter media
             object_atten_rgb = (weights[..., None] * atten_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
             media_rgb = (bs_weights * full_trans[..., None] * c_med).sum(axis=-2)
@@ -346,25 +346,22 @@ def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_tra
                 'c_med': c_med,
             })
         else:
-            # Concealing field + scatter media
+            # absorbing field + scatter media
             object_product = weights[..., None] * atten_trans[..., extra_sample_len-1:, :] * rgbs
             media_product = bs_weights * full_trans[..., None] * c_med
             
-            conceal_J = (weights[..., None] * conceal_trans[..., extra_sample_len-1:, :] * rgbs).sum(axis=-2)
-            conceal_object_rgb = (object_product * conceal_trans[..., extra_sample_len-1:, :]).sum(axis=-2)
-            conceal_media_rgb = (media_product * conceal_trans).sum(axis=-2)
+            absorb_object_rgb = (object_product * absorb_trans[..., extra_sample_len-1:, :]).sum(axis=-2)
+            absorb_media_rgb = (media_product * absorb_trans).sum(axis=-2)
             light_object_rgb = object_product.sum(axis=-2)
             light_media_rgb = media_product.sum(axis=-2)
 
             rendering.update({
-                'rgb': conceal_object_rgb + conceal_media_rgb,
-                'J': conceal_J,
-                'bs_rgb': conceal_media_rgb,
+                'rgb': absorb_object_rgb + absorb_media_rgb,
                 'light_rgb': light_object_rgb + light_media_rgb,
-                'light_J': origin_rgb,
-                'light_bs_rgb': light_media_rgb,
+                'J': origin_rgb,
+                'bs_rgb': light_media_rgb,
                 'c_med': c_med,
-                'conceal_trans': conceal_trans
+                'absorb_trans': absorb_trans
             })
     
     t_mids = 0.5 * (tdist[..., :-1] + tdist[..., 1:])
@@ -373,9 +370,9 @@ def volumetric_rendering(rgbs, c_med, weights, bs_weights, full_trans, atten_tra
             torch.nan_to_num((weights * t_mids).sum(dim=-1) / acc.clamp_min(eps), torch.inf),
             tdist[..., 0], tdist[..., -1]))
     rendering['depth'] = depth
+    rendering['acc'] = acc
     
     if compute_extras:
-        rendering['acc'] = acc
         if extras is not None:
             for k, v in extras.items():
                 if v is not None:

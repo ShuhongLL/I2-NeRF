@@ -1,3 +1,5 @@
+import os
+import matplotlib.pyplot as plt
 import accelerate
 import gin
 from internal import coord
@@ -34,6 +36,7 @@ class Model(nn.Module):
     """A mip-Nerf360 model containing all MLPs."""
     num_prop_samples: int = 64  # The number of samples for each proposal level.
     num_nerf_samples: int = 32  # The number of samples the final nerf level.
+    num_extra_media_samples: int = 0 # The number of extra media samples.
     num_levels: int = 3  # The number of sampling levels (3==2 proposals, 1 nerf).
     bg_intensity_range = (1., 1.)  # The range of background colors.
     anneal_slope: float = 10  # Higher = more rapid annealing.
@@ -60,6 +63,8 @@ class Model(nn.Module):
         super().__init__()
         set_kwargs(self, kwargs)
         self.config = config
+        self.eps = torch.finfo(torch.float).eps
+        self.checkpoint_dir = config.checkpoint_dir
 
         from extensions import Backend
         Backend.set_backend('dpcpp' if self.config.dpcpp_backend else 'cuda')
@@ -70,9 +75,11 @@ class Model(nn.Module):
         # being regularized.
         self.nerf_mlp = NerfMLP(num_glo_features=self.num_glo_features,
                                 num_glo_embeddings=self.num_glo_embeddings,
-                                enable_media_scatter=self.config.enable_media_scatter,
-                                enable_conceal=self.config.enable_conceal,
-                                constant_media=self.config.constant_media)
+                                enable_scatter=self.config.enable_scatter,
+                                enable_absorb=self.config.enable_absorb,
+                                enable_spatial_media=self.config.enable_spatial_media,
+                                consistent_attenuation=self.config.consistent_attenuation,
+                                enable_downwell_depth=self.config.enable_downwell_depth)
         if self.config.dpcpp_backend:
             self.generator = self.nerf_mlp.encoder.backend.get_generator()
         else:
@@ -103,6 +110,7 @@ class Model(nn.Module):
             train_frac,
             compute_extras,
             zero_glo=True,
+            step=0,
     ):
         """The mip-NeRF Model.
 
@@ -165,6 +173,7 @@ class Model(nn.Module):
             # After the first level (where dilation would be a no-op) optionally
             # dilate the interval weights along each ray slightly so that they're
             # overestimates, which can reduce aliasing.
+            sampled_sdist = sdist
             use_dilation = self.dilation_bias > 0 or self.dilation_multiplier > 0 # True
             if i_level > 0 and use_dilation:
                 sdist, weights = stepfun.max_dilate_weights(
@@ -192,21 +201,16 @@ class Model(nn.Module):
                 torch.full_like(sdist[..., :-1], -torch.inf))
 
             # Draw sampled intervals from each ray's current weights.
-            if self.config.importance_sampling: # False
-                sdist = self.backend.funcs.sample_intervals(
-                    rand,
-                    sdist.contiguous(),
-                    stepfun.integrate_weights(torch.softmax(logits_resample, dim=-1)).contiguous(),
-                    num_samples,
-                    self.single_jitter)
-            else:
-                sdist = stepfun.sample_intervals(
-                    rand,
-                    sdist,
-                    logits_resample,
-                    num_samples,
-                    single_jitter=self.single_jitter,
-                    domain=(init_s_near, init_s_far))
+            sdist = stepfun.sample_intervals(
+                rand,
+                sdist,
+                sampled_sdist,
+                logits_resample,
+                density if not is_prop else None,
+                num_samples,
+                single_jitter=self.single_jitter,
+                domain=(init_s_near, init_s_far),
+                extra_sample_len=self.num_extra_media_samples)
 
             # Optimization will usually go nonlinear if you propagate gradients
             # through sampling.
@@ -237,22 +241,115 @@ class Model(nn.Module):
                 glo_vec=None if is_prop else glo_vec,
                 exposure=batch.get('exposure_values'),
             )
+            
+            # Object sigma density.
+            density = ray_results['density']
+            
             if self.config.gradient_scaling:
-                ray_results['rgb'], ray_results['density'] = train_utils.GradientScaler.apply(
-                    ray_results['rgb'], ray_results['density'], ts.mean(dim=-1))
+                ray_results['rgb'], density = train_utils.GradientScaler.apply(
+                    ray_results['rgb'], density, ts.mean(dim=-1))
 
             # Get the weights used by volumetric rendering (and our other losses).
-            weights, bs_weights, full_trans, bs_trans, atten_trans, conceal_trans = \
+            weights, bs_weights, full_trans, bs_trans, atten_trans, absorb_trans = \
             render.compute_alpha_weights(
-                ray_results['density'],
+                density,
                 ray_results['sigma_atten'],
                 ray_results['sigma_bs'],
-                ray_results['sigma_conceal'],
+                ray_results['sigma_absorb'],
                 tdist,
                 batch['directions'],
                 extra_samples=self.config.extra_samples,
                 opaque_background=self.opaque_background,
             )
+            
+            if step > 0 and step % self.config.train_render_every == 0 and not is_prop:
+                figure_dir = os.path.dirname(os.path.normpath(self.checkpoint_dir))
+                os.makedirs(os.path.join(figure_dir, "rays"), exist_ok=True)
+                num_bins = 80
+                bins = np.linspace(0, 1, num_bins + 1)
+                bin_centers = (bins[:-1] + bins[1:]) / 2
+                bar_width = 0.8 * (bins[1] - bins[0])
+                
+                smid = (sdist[..., :-1] + sdist[..., 1:])/2
+                smid_flat = smid.flatten().detach().cpu().numpy()
+                
+                # # Plot density
+                # if self.config.enable_absorb and self.config.enable_spatial_media:
+                #     sigma_absorb_flat = ray_results['sigma_absorb'].flatten().detach().cpu().numpy()
+                #     density_flat = ray_results['density'].flatten().detach().cpu().numpy()
+                #     up_values, _ = np.histogram(smid_flat, bins=bins, weights=density_flat)
+                #     down_values, _ = np.histogram(smid_flat, bins=bins, weights=sigma_absorb_flat)
+
+                #     plt.figure(figsize=(10, 5))
+                #     plt.bar(bin_centers, up_values, width=bar_width, color='green', label='Obj Sigma', align='center')
+                #     plt.bar(bin_centers, -down_values, width=bar_width, color='gray', label='absorb Sigma', align='center')
+                #     plt.axhline(0, color='black', linewidth=1)
+                #     plt.xlim(0, 1)
+                #     plt.xlabel("Sample Positions")
+                #     plt.ylabel("Density")
+                #     plt.title(f"absorb Density Weight Distribution of a Batch Rays")
+                #     plt.legend()
+                #     plt.savefig(os.path.join(figure_dir, "rays",
+                #                              f"absorb_batch_density_distr={step}.png"),
+                #                 bbox_inches="tight")
+                    
+                #     idx = torch.randint(0, density.shape[0], (1,)).item()
+                #     ray_smid = smid[idx].squeeze().detach().cpu().numpy()
+                #     ray_density = density[idx].squeeze().detach().cpu().numpy()
+                #     ray_absorb = ray_results['sigma_absorb'][idx].squeeze().detach().cpu().numpy()
+                    
+                #     plt.figure(figsize=(10, 5))
+                #     plt.plot(ray_smid, ray_density, label="Obj Sigma")
+                #     plt.plot(ray_smid, ray_absorb, label="absorb Sigma")
+                #     plt.legend()
+                #     plt.xlabel("Sample Position")
+                #     plt.ylabel("Sigma")
+                #     plt.title(f"Sigma Distribution of a Ray: #{idx}")
+                #     plt.yticks()
+                #     plt.xticks()
+                #     plt.savefig(os.path.join(figure_dir, "rays",
+                #                             f"absorb_sigma_stp={step}.png"),
+                #                 bbox_inches="tight")
+                
+                # # spatial-varying scattering media:
+                # if self.config.enable_scatter and self.config.enable_spatial_media:
+                #     sigma_bs_flat = ray_results['sigma_bs'].mean(dim=-1).flatten().detach().cpu().numpy()
+                #     density_flat = ray_results['density'].flatten().detach().cpu().numpy()
+                #     up_values, _ = np.histogram(smid_flat, bins=bins, weights=density_flat)
+                #     down_values, _ = np.histogram(smid_flat, bins=bins, weights=sigma_bs_flat)
+
+                #     plt.figure(figsize=(10, 5))
+                #     plt.bar(bin_centers, up_values, width=bar_width, color='green', label='Obj Sigma', align='center')
+                #     plt.bar(bin_centers, -down_values, width=bar_width, color='gray', label='Bs Sigma', align='center')
+                #     plt.axhline(0, color='black', linewidth=1)
+                #     plt.xlim(0, 1)
+                #     plt.xlabel("Sample Positions")
+                #     plt.ylabel("Density")
+                #     plt.title(f"Bs Density Weight Distribution of a Batch Rays")
+                #     plt.legend()
+                #     plt.savefig(os.path.join(figure_dir, "rays",
+                #                              f"bs_batch_density_distr={step}.png"),
+                #                 bbox_inches="tight")
+                    
+                #     idx = torch.randint(0, density.shape[0], (1,)).item()
+                #     ray_smid = smid[idx].squeeze().detach().cpu().numpy()
+                #     ray_density = density[idx].squeeze().detach().cpu().numpy()
+                #     ray_bs = ray_results['sigma_bs'][idx].squeeze().detach().cpu().numpy()
+                    
+                #     plt.figure(figsize=(10, 5))
+                #     plt.plot(ray_smid, ray_density, color='black', label="Obj Sigma")
+                #     plt.plot(ray_smid, ray_bs[:, 0], color='red', label="Bs R")
+                #     plt.plot(ray_smid, ray_bs[:, 1], color='green', label="Bs G")
+                #     plt.plot(ray_smid, ray_bs[:, 2], color='blue', label="Bs B")
+                #     plt.legend()
+                #     plt.xlabel("Sample Position")
+                #     plt.ylabel("Sigma")
+                #     plt.title(f"Sigma Distribution of a Ray: #{idx}")
+                #     plt.yticks()
+                #     plt.xticks()
+                #     plt.savefig(os.path.join(figure_dir, "rays",
+                #                             f"bs_sigma_stp={step}.png"),
+                #                 bbox_inches="tight")
                 
             # Define or sample the background color for each ray.
             if self.bg_intensity_range[0] == self.bg_intensity_range[1]:
@@ -280,6 +377,10 @@ class Model(nn.Module):
                     scaling = 1 + mask[..., None] * self.exposure_scaling_offsets(exposure_idx.long())
                     ray_results['rgb'] *= scaling[..., None, :]
 
+            # est_cmed = ray_results['ambient_light'] * torch.exp(-ray_results['sigma_atten'].detach() * ray_results['media_depth']) if not is_prop else None
+            # if not is_prop:
+            #     print(f"Media depth: {ray_results['media_depth'].squeeze().cpu()[0][0].item()}")
+
             # Render each ray.
             rendering = render.volumetric_rendering(
                 ray_results['rgb'],
@@ -288,7 +389,7 @@ class Model(nn.Module):
                 bs_weights,
                 full_trans,
                 atten_trans,
-                conceal_trans,
+                absorb_trans,
                 tdist,
                 bg_rgbs,
                 batch['far'],
@@ -299,14 +400,18 @@ class Model(nn.Module):
                     if k.startswith('normals') or k in ['roughness']
                 })
             
-            if self.config.enable_media_scatter and not is_prop:
+            ray_results['full_trans'] = full_trans
+            rendering['sigma_obj'] = density
+            
+            if self.config.enable_scatter and not is_prop:
                 rendering['sigma_atten'] = ray_results['sigma_atten']
                 rendering['sigma_bs'] = ray_results['sigma_bs']
-                rendering['full_trans'] = full_trans
+                if self.config.enable_downwell_depth:
+                    rendering['media_depth'] = ray_results['media_depth'] # Vertical depth of scattering media.
                 
-            if self.config.enable_conceal and not is_prop:
-                rendering['sigma_obj'] = ray_results['density']
-                rendering['sigma_conceal'] = ray_results['sigma_conceal']
+            if self.config.enable_absorb and not is_prop:
+                rendering['sigma_absorb'] = ray_results['sigma_absorb']
+                ray_results['absorb_trans'] = absorb_trans
 
             if compute_extras:
                 # Collect some rays to visualize directly. By naming these quantities
@@ -335,6 +440,7 @@ class Model(nn.Module):
                     ray_results['loss_hash_decay'] = loss_hash_decay
 
             renderings.append(rendering)
+            ray_results['tdist'] = tdist.clone()
             ray_results['sdist'] = sdist.clone()
             ray_results['weights'] = weights.clone()
             ray_history.append(ray_results)
@@ -368,7 +474,6 @@ class MLP(nn.Module):
     # If False and if use_directional_enc is True, use zero roughness in IDE.
     enable_pred_roughness: bool = False
     roughness_bias: float = -1.  # Shift added to raw roughness pre-activation.
-    use_diffuse_color: bool = False  # If True, predict diffuse & specular colors.
     use_specular_tint: bool = False  # If True, predict tint.
     use_n_dot_v: bool = False  # If True, feed dot(n * viewdir) to 2nd MLP.
     bottleneck_noise: float = 0.0  # Std. deviation of noise added to bottleneck.
@@ -392,10 +497,12 @@ class MLP(nn.Module):
     grid_log2_hashmap_size: int = 21
     net_width_glo: int = 128  # The width of the second part of MLP.
     net_depth_glo: int = 2  # The width of the second part of MLP.
-    enable_media_scatter: bool = False # Enable the volume rendering of scatter media.
-    enable_conceal: bool = False # Enable the concealing field.
+    enable_scatter: bool = False # Enable the volume rendering of scatter media.
+    enable_absorb: bool = False # Enable the absorbing field.
+    enable_spatial_media: bool = False # Use constant media field.
+    consistent_attenuation: bool = False # Using same attenuation and backscattering parameters (for haze).
+    enable_downwell_depth: bool = False # Using the vertical attenuation model by predicting media depth.
     media_bias: float = -1 # Shift added to raw water densities pre-activation.
-    constant_media: bool = True # constant media density and color per ray
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -427,40 +534,19 @@ class MLP(nn.Module):
                                    log2_hashmap_size=self.grid_log2_hashmap_size,
                                    gridtype='hash',
                                    align_corners=False)
-        last_dim = self.encoder.output_dim
         
-        if self.scale_featurization:
-            last_dim += self.encoder.num_levels
+        last_dim = self.encoder.output_dim
             
         self.density_layer = nn.Sequential(nn.Linear(last_dim, 64),
                                            nn.ReLU(),
                                            nn.Linear(64,
                                                      1 if self.disable_rgb else self.bottleneck_width))  # Hardcoded to a single channel.
-        last_dim = 1 if self.disable_rgb and not self.enable_pred_normals else self.bottleneck_width
-        
-        if self.enable_pred_normals:
-            self.normal_layer = nn.Linear(last_dim, 3)
+        last_dim = 1 if self.disable_rgb else self.bottleneck_width
 
         if not self.disable_rgb:
-            if self.use_diffuse_color:
-                self.diffuse_layer = nn.Linear(last_dim, self.num_rgb_channels)
-
-            if self.use_specular_tint:
-                self.specular_layer = nn.Linear(last_dim, 3)
-
-            if self.enable_pred_roughness:
-                self.roughness_layer = nn.Linear(last_dim, 1)
-
             # Output of the first part of MLP.
-            if self.bottleneck_width > 0:
-                last_dim_rgb = self.bottleneck_width
-            else:
-                last_dim_rgb = 0
-
-            last_dim_rgb += dim_dir_enc
-
-            if self.use_n_dot_v:
-                last_dim_rgb += 1
+            dim_intput_mlp = self.bottleneck_width
+            dim_intput_mlp += dim_dir_enc
 
             if self.num_glo_features > 0:
                 last_dim_glo = self.num_glo_features
@@ -470,58 +556,74 @@ class MLP(nn.Module):
                 self.register_module(f"lin_glo_{self.net_depth_glo - 1}",
                                      nn.Linear(last_dim_glo, self.bottleneck_width * 2))
 
-            input_dim_rgb = last_dim_rgb
+            last_dim_rgb = dim_intput_mlp
             for i in range(self.net_depth_viewdirs):
                 lin = nn.Linear(last_dim_rgb, self.net_width_viewdirs)
                 torch.nn.init.kaiming_uniform_(lin.weight)
                 self.register_module(f"lin_second_stage_{i}", lin)
                 last_dim_rgb = self.net_width_viewdirs
                 if i == self.skip_layer_dir:
-                    last_dim_rgb += input_dim_rgb
+                    last_dim_rgb += dim_intput_mlp
             self.rgb_layer = nn.Linear(last_dim_rgb, self.num_rgb_channels)
             
-            if self.enable_media_scatter or self.enable_conceal:
-                input_dim_media = dim_dir_enc
-                last_dim_media = input_dim_media
-                    
+            if self.enable_scatter or self.enable_absorb:
+                if not self.enable_spatial_media:
+                    dim_intput_mlp = dim_dir_enc
+                else:
+                    self.media_encoder = GridEncoder(input_dim=3,
+                                                     num_levels=6,
+                                                     level_dim=4,
+                                                     base_resolution=16,
+                                                     desired_resolution=512,
+                                                     log2_hashmap_size=self.grid_log2_hashmap_size,
+                                                     gridtype='hash',
+                                                     align_corners=False)
+                
+                    self.media_output_layer = nn.Sequential(nn.Linear(self.media_encoder.output_dim, 64),
+                                                            nn.ReLU(),
+                                                            nn.Linear(64, self.bottleneck_width))
+                
+                last_dim_media = dim_intput_mlp
                 for i in range(self.net_depth_viewdirs):
                     lin = nn.Linear(last_dim_media, self.net_width_viewdirs)
                     torch.nn.init.kaiming_uniform_(lin.weight)
                     self.register_module(f"lin_media_stage_{i}", lin)
                     last_dim_media = self.net_width_viewdirs
                     if i == self.skip_layer_dir:
-                        last_dim_media += input_dim_media
+                        last_dim_media += dim_intput_mlp
                 
-                if self.enable_media_scatter:
-                    self.media_rgb_layer = nn.Linear(last_dim_media, self.num_rgb_channels)
-                    self.sigma_atten_layer = nn.Linear(last_dim_media, self.num_rgb_channels)
-                    self.sigma_bs_layer = nn.Linear(last_dim_media, self.num_rgb_channels)
-                if self.enable_conceal:
-                    self.sigma_conceal_layer = nn.Linear(last_dim_media, 1)
+                if self.enable_scatter:
+                    if self.consistent_attenuation:
+                        self.sigma_bs_layer = nn.Linear(last_dim_media, 1)
+                    else:
+                        self.sigma_atten_layer = nn.Linear(last_dim_media, self.num_rgb_channels)
+                        self.sigma_bs_layer = nn.Linear(last_dim_media, self.num_rgb_channels)
+                    
+                    if self.enable_downwell_depth:    
+                        self.media_depth_layer = nn.Linear(last_dim_media, 1)
+                        self.light_source = nn.Parameter(torch.zeros(3))
+                    else:
+                        self.media_rgb_layer = nn.Linear(last_dim_media, self.num_rgb_channels)
+                        
+                if self.enable_absorb:
+                    self.sigma_absorb_layer = nn.Linear(last_dim_media, 1)
 
-    def predict_density(self, means, stds, rand=False, no_warp=False):
+    def predict_density(self, encoder, output_layer, means, stds, rand=False, no_warp=False):
         """Helper function to output density."""
         # Encode input positions
-        if self.warp_fn is not None and not no_warp:
+        if self.warp_fn is not None and stds is not None and not no_warp:
             means, stds = coord.track_linearize(self.warp_fn, means, stds)
             # contract [-2, 2] to [-1, 1]
             bound = 2
             means = means / bound
             stds = stds / bound
-        features = self.encoder(means, bound=1).unflatten(-1, (self.encoder.num_levels, -1))
-        weights = torch.erf(1 / torch.sqrt(8 * stds[..., None] ** 2 * self.encoder.grid_sizes ** 2))
-        features = (features * weights[..., None]).mean(dim=-3).flatten(-2, -1)
-        if self.scale_featurization: # False
-            with torch.no_grad():
-                vl2mean = segment_coo((self.encoder.embeddings ** 2).sum(-1),
-                                      self.encoder.idx,
-                                      torch.zeros(self.grid_num_levels, device=weights.device),
-                                      self.grid_num_levels,
-                                      reduce='mean'
-                                      )
-            featurized_w = (2 * weights.mean(dim=-2) - 1) * (self.encoder.init_std ** 2 + vl2mean).sqrt()
-            features = torch.cat([features, featurized_w], dim=-1)
-        x = self.density_layer(features)
+        features = encoder(means, bound=1).unflatten(-1, (encoder.num_levels, -1))
+        
+        if stds is not None:
+            weights = torch.erf(1 / torch.sqrt(8 * stds[..., None] ** 2 * encoder.grid_sizes ** 2))
+            features = (features * weights[..., None]).mean(dim=-3).flatten(-2, -1)
+    
+        x = output_layer(features)
         raw_density = x[..., 0]  # Hardcoded to a single channel.
         # Add noise to regularize the density predictions if needed.
         if rand and (self.density_noise > 0):
@@ -560,64 +662,24 @@ class MLP(nn.Module):
       normals_pred: [..., 3], or None.
       roughness: [..., 1], or None.
     """
-        if self.disable_density_normals: # True
-            raw_density, x, means_contract = self.predict_density(means, stds, rand=rand, no_warp=no_warp)
-            raw_grad_density = None
-            normals = None
-        else:
-            with torch.enable_grad():
-                means.requires_grad_(True)
-                raw_density, x, means_contract = self.predict_density(means, stds, rand=rand, no_warp=no_warp)
-                d_output = torch.ones_like(raw_density, requires_grad=False, device=raw_density.device)
-                raw_grad_density = torch.autograd.grad(
-                    outputs=raw_density,
-                    inputs=means,
-                    grad_outputs=d_output,
-                    create_graph=True,
-                    retain_graph=True,
-                    only_inputs=True)[0]
-            raw_grad_density = raw_grad_density.mean(-2)
-            # Compute normal vectors as negative normalized density gradient.
-            # We normalize the gradient of raw (pre-activation) density because
-            # it's the same as post-activation density, but is more numerically stable
-            # when the activation function has a steep or flat gradient.
-            normals = -ref_utils.l2_normalize(raw_grad_density)
-
-        if self.enable_pred_normals:
-            grad_pred = self.normal_layer(x)
-
-            # Normalize negative predicted gradients to get predicted normal vectors.
-            normals_pred = -ref_utils.l2_normalize(grad_pred)
-            normals_to_use = normals_pred
-        else:
-            grad_pred = None
-            normals_pred = None
-            normals_to_use = normals
+        raw_density, x, means_contract = self.predict_density(self.encoder, self.density_layer,
+                                                              means, stds, rand=rand, no_warp=no_warp)
 
         # Apply bias and activation to raw density
         density = F.softplus(raw_density + self.density_bias)
 
-        roughness = None
-        media_rgb = None
+        # media_rgb = None
         sigma_atten = None
         sigma_bs = None
-        sigma_conceal = None
+        sigma_absorb = None
+        media_rgb = None
+        media_depth = None
+        ambient_light = None
         
         if self.disable_rgb:
             rgb = torch.zeros(density.shape + (3,), device=density.device)
         else:
             if viewdirs is not None:
-                # Predict diffuse color.
-                if self.use_diffuse_color:
-                    raw_rgb_diffuse = self.diffuse_layer(x)
-
-                if self.use_specular_tint:
-                    tint = torch.sigmoid(self.specular_layer(x))
-
-                if self.enable_pred_roughness:
-                    raw_roughness = self.roughness_layer(x)
-                    roughness = (F.softplus(raw_roughness + self.roughness_bias))
-
                 # Output of the first part of MLP.
                 if self.bottleneck_width > 0:
                     bottleneck = x
@@ -640,94 +702,81 @@ class MLP(nn.Module):
                 else:
                     x = []
 
-                # Encode view (or reflection) directions.
-                if self.use_reflections:
-                    # Compute reflection directions. Note that we flip viewdirs before
-                    # reflecting, because they point from the camera to the point,
-                    # whereas ref_utils.reflect() assumes they point toward the camera.
-                    # Returned refdirs then point from the point to the environment.
-                    refdirs = ref_utils.reflect(-viewdirs[..., None, :], normals_to_use)
-                    # Encode reflection directions.
-                    dir_enc = self.dir_enc_fn(refdirs, roughness)
-                else:
-                    # Encode view directions.
-                    dir_enc = self.dir_enc_fn(viewdirs, roughness)
-                    concat_dir_enc = torch.broadcast_to(
-                        dir_enc[..., None, :],
-                        bottleneck.shape[:-1] + (dir_enc.shape[-1],))
+                # Encode view directions.
+                dir_enc = self.dir_enc_fn(viewdirs, None)
+                concat_dir_enc = torch.broadcast_to(
+                    dir_enc[..., None, :],
+                    bottleneck.shape[:-1] + (dir_enc.shape[-1],))
 
                 # Append view (or reflection) direction encoding to bottleneck vector.
                 x.append(concat_dir_enc)
 
-                # Append dot product between normal vectors and view directions.
-                if self.use_n_dot_v:
-                    dotprod = torch.sum(
-                        normals_to_use * viewdirs[..., None, :], dim=-1, keepdim=True)
-                    x.append(dotprod)
-
                 # Concatenate bottleneck, directional encoding, and GLO.
                 x = torch.cat(x, dim=-1)
                 # Output of the second part of MLP.
-                inputs = x
+                mlp_inputs = x
                 for i in range(self.net_depth_viewdirs):
                     x = self.get_submodule(f"lin_second_stage_{i}")(x)
                     x = F.relu(x)
                     if i == self.skip_layer_dir:
-                        x = torch.cat([x, inputs], dim=-1)
+                        x = torch.cat([x, mlp_inputs], dim=-1)
             # If using diffuse/specular colors, then `rgb` is treated as linear
             # specular color. Otherwise it's treated as the color itself.
             rgb = torch.sigmoid(self.rgb_premultiplier *
                                 self.rgb_layer(x) +
                                 self.rgb_bias)
 
-            if self.use_diffuse_color:
-                # Initialize linear diffuse color around 0.25, so that the combined
-                # linear color is initialized around 0.5.
-                diffuse_linear = torch.sigmoid(raw_rgb_diffuse - np.log(3.0))
-                if self.use_specular_tint:
-                    specular_linear = tint * rgb
-                else:
-                    specular_linear = 0.5 * rgb
-
-                # Combine specular and diffuse components and tone map to sRGB.
-                rgb = torch.clip(image.linear_to_srgb(specular_linear + diffuse_linear), 0.0, 1.0)
-
             # Apply padding, mapping color to [-rgb_padding, 1+rgb_padding].
             rgb = rgb * (1 + 2 * self.rgb_padding) - self.rgb_padding
             
-            if self.enable_media_scatter or self.enable_conceal:
-                if self.constant_media:
-                    media_inputs = dir_enc[..., None, :] # [batch_size, 1, 1, 1, feat_dim]
+            if self.enable_scatter or self.enable_absorb:
+                if self.enable_spatial_media:
+                    _, x, _ = self.predict_density(self.media_encoder, self.media_output_layer,
+                                                means, stds, rand=rand, no_warp=no_warp)
+                    mlp_inputs = [x, concat_dir_enc]
                 else:
-                    media_inputs = concat_dir_enc # [batch_size, 1, 1, num_samples, feat_dim]
-                x = media_inputs
+                    mlp_inputs = [concat_dir_enc]
+                    
+                mlp_inputs = torch.cat(mlp_inputs, dim=-1)
+                x = mlp_inputs
                 for i in range(self.net_depth_viewdirs):
                     x = self.get_submodule(f"lin_media_stage_{i}")(x)
                     x = F.relu(x)
                     if i == self.skip_layer_dir:
-                        x = torch.cat([x, media_inputs], dim=-1)
+                        x = torch.cat([x, mlp_inputs], dim=-1)
                 
-                if self.enable_media_scatter:
-                    media_rgb = torch.sigmoid(self.rgb_premultiplier * self.media_rgb_layer(x) + self.rgb_bias)
-                    sigma_atten = F.softplus(self.sigma_atten_layer(x) + self.media_bias)
+                if self.enable_scatter:
+                    # x = x.mean(dim=-2, keepdim=True)
                     sigma_bs = F.softplus(self.sigma_bs_layer(x) + self.media_bias)
-                if self.enable_conceal:
-                    # sigma_conceal = F.softplus(self.sigma_conceal_layer(x))
-                    sigma_conceal = F.sigmoid(self.sigma_conceal_layer(x))
+                    sigma_atten = F.softplus(self.sigma_atten_layer(x) + self.media_bias)
+
+                    # # Whether use same attenuation parameters.
+                    # if not self.consistent_attenuation:
+                    #     sigma_atten = F.softplus(self.sigma_atten_layer(x) + self.media_bias)
+                    # else:
+                    #     sigma_atten = sigma_bs
+                    
+                    # Whether use the vertical depth model.
+                    if self.enable_downwell_depth:
+                        media_depth = F.softplus(self.media_depth_layer(x))
+                        ambient_light = torch.sigmoid(self.light_source) / 3
+                        media_rgb = ambient_light * torch.exp(-sigma_bs.detach() * media_depth)
+                    else:
+                        media_rgb = torch.sigmoid(self.rgb_premultiplier * self.media_rgb_layer(x) + self.rgb_bias)
+                        
+                if self.enable_absorb:
+                    sigma_absorb = F.softplus(self.sigma_absorb_layer(x))
    
         return dict(
             coord=means_contract,
             density=density,
             rgb=rgb,
-            raw_grad_density=raw_grad_density,
-            grad_pred=grad_pred,
-            normals=normals,
-            normals_pred=normals_pred,
-            roughness=roughness,
             media_rgb=media_rgb,
+            media_depth=media_depth,
+            ambient_light=ambient_light,
             sigma_atten=sigma_atten,
             sigma_bs=sigma_bs,
-            sigma_conceal=sigma_conceal
+            sigma_absorb=sigma_absorb
         )
 
 
@@ -749,7 +798,8 @@ def render_image(model,
                  train_frac,
                  config,
                  verbose=True,
-                 return_weights=False):
+                 return_weights=False,
+                 return_ray_dist=False):
     """Render all the pixels of an image (in test mode).
 
   Args:
@@ -811,6 +861,12 @@ def render_image(model,
         if return_weights:
             chunk_rendering['weights'] = gather(ray_history[-1]['weights'])
             chunk_rendering['coord'] = gather(ray_history[-1]['coord'])
+            
+        if return_ray_dist:
+            chunk_rendering['sdist'] = gather(ray_history[-1]['sdist'])
+            chunk_rendering['tdist'] = gather(ray_history[-1]['tdist'])
+            
+        chunk_rendering = tree_map(lambda x: x.detach().cpu(), chunk_rendering)
         chunks.append(chunk_rendering)
 
     # Concatenate all chunks within each leaf of a single pytree.

@@ -1,6 +1,7 @@
 from internal import math
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 def searchsorted(a, v):
@@ -151,10 +152,10 @@ def integrate_weights_np(w):
     return cw0
 
 
-def invert_cdf(u, t, w_logits):
+def invert_cdf(u, t, w):
     """Invert the CDF defined by (t, w) at the points specified by u in [0, 1)."""
     # Compute the PDF and CDF for each weight vector.
-    w = torch.softmax(w_logits, dim=-1)
+    # w = torch.softmax(w_logits, dim=-1)
     cw = integrate_weights(w)
     # Interpolate into the inverse CDF.
     t_new = math.sorted_interp(u, cw, t)
@@ -249,16 +250,21 @@ def sample_np(rand,
 
 
 def sample_intervals(rand,
-                     t,
+                     sdist,
+                     sampled_sdist,
                      w_logits,
+                     density,
                      num_samples,
                      single_jitter=False,
-                     domain=(-torch.inf, torch.inf)):
+                     domain=(-torch.inf, torch.inf),
+                     kernel_size=7,
+                     extra_sample_len=32):
     """Sample *intervals* (rather than points) from a step function.
 
   Args:
     rand: random number generator (or None for `linspace` sampling).
-    t: [..., num_bins + 1], bin endpoint coordinates (must be sorted)
+    sdist: [..., num_bins + 1], dilated bin endpoint coordinates (must be sorted)
+    sampled_sdist: [..., num_samples + 1], 'num_samples' number of sampled endpoint
     w_logits: [..., num_bins], logits corresponding to bin weights
     num_samples: int, the number of intervals to sample.
     single_jitter: bool, if True, jitter every sample along each ray by the same
@@ -271,14 +277,37 @@ def sample_intervals(rand,
     if num_samples <= 1:
         raise ValueError(f'num_samples must be > 1, is {num_samples}.')
 
+    normalized_weight = torch.softmax(w_logits, dim=-1)
     # Sample a set of points from the step function.
     centers = sample(
         rand,
-        t,
-        w_logits,
+        sdist,
+        normalized_weight,
         num_samples,
         single_jitter,
         deterministic_center=True)
+    
+    if density is not None and extra_sample_len > 0:
+      kernel_weight = torch.ones(1, 1, kernel_size, device=density.device) / kernel_size
+      density_shape = list(density.shape)
+      # [batch_size, ..., num_samples] -> [batch_size, num_samples] -> [batch_size, 1, num_samples]
+      density = density.detach().squeeze().unsqueeze(-2)
+      density = F.conv1d(density, kernel_weight, padding=kernel_size//2) # [batch_size, 1, num_samples]
+      density = density.reshape(density_shape)
+      # media_weight = ((1 - density) * torch.exp(-gamma * obj_smids)) ** 2
+      media_weight = 1 - density
+      media_weight /= torch.sum(media_weight, dim=-1, keepdim=True)
+      
+      centers_med = sample(
+        rand,
+        sampled_sdist,
+        media_weight,
+        extra_sample_len,
+        single_jitter,
+        deterministic_center=True)
+      
+      centers = torch.cat([centers, centers_med], dim=-1)
+      centers, sorted_idx = torch.sort(centers, dim=-1)
 
     # The intervals we return will span the midpoints of each adjacent sample.
     mid = (centers[..., 1:] + centers[..., :-1]) / 2

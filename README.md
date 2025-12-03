@@ -12,15 +12,7 @@
 </h3>
 
 <p align="center">
-  <video src="assets/uw_cover.mp4"
-         width="100%"
-         autoplay
-         loop
-         muted
-         controls
-         playsinline>
-    Your browser does not support the video tag.
-  </video>
+  <img src="assets/uw_cover.gif" width="100%" alt="I2-NeRF demo">
 </p>
 
 The source code will be open-sourced shortly.

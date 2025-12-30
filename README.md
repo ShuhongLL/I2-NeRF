@@ -3,7 +3,11 @@
 <h1 align="center">I2-NeRF: Learning Neural Radiance Fields Under Physically-Grounded Media Interactions</h1>
 <h3 align="center">🌟 NeurIPS 2025 🌟</h3>
 <p align="center">
-  Shuhong Liu, Lin Gu, Ziteng Cui, Xuangeng Chu, Tatsuya Harada
+  <a href="https://shuhongll.github.io/">Shuhong Liu</a>, 
+  <a href="https://sites.google.com/view/linguedu/home">Lin Gu</a>, 
+  <a href="https://cuiziteng.github.io/">Ziteng Cui</a>, 
+  <a href="https://xg-chu.site/">Xuangeng Chu</a>, 
+  <a href="https://www.mi.t.u-tokyo.ac.jp/harada/">Tatsuya Harada</a>
 </p>
 <h3 align="center">
   <a href="https://arxiv.org/abs/2510.22161">Arxiv</a> |

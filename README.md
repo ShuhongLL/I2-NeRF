@@ -32,8 +32,9 @@ pip install ./extensions/cuda
 ```
 
 ## 📦 Dataset
-We evaluate low-light scenes using the [LOM dataset](https://github.com/cuiziteng/Aleth-NeRF)
-, which can be downloaded [here](https://drive.google.com/file/d/1orgKEGApjwCm6G8xaupwHKxMbT2s9IAG/view). For underwater scenes evaluation, we use the [SeaThru-NeRF dataset](https://github.com/deborahLevy130/seathru_NeRF), which can be downloaded [here](https://drive.usercontent.google.com/download?id=1RzojBFvBWjUUhuJb95xJPSNP3nJwZWaT&export=download&authuser=0).
+We evaluate low-light scenes using the [LOM dataset](https://github.com/cuiziteng/Aleth-NeRF) ([links](https://drive.google.com/file/d/1orgKEGApjwCm6G8xaupwHKxMbT2s9IAG/view)). For underwater scenes evaluation, we use the [SeaThru-NeRF dataset](https://github.com/deborahLevy130/seathru_NeRF) ([links](https://drive.usercontent.google.com/download?id=1RzojBFvBWjUUhuJb95xJPSNP3nJwZWaT&export=download&authuser=0)).
+
+We provide direct downloads of the rendered test views produced by our model on the LOM and SeaThru-NeRF datasets ([links](https://drive.google.com/drive/folders/1VtbdbytdmS2Xv9OxrsCL9RPtoOUmIzoG?usp=sharing)).
 
 For customized data, we support [Colmap](https://github.com/colmap/colmap), [LLFF](mgs2poses.py), and [Blender](https://github.com/NVlabs/instant-ngp/blob/master/scripts/colmap2nerf.py) format. Please follow the corresponding data preparation instructions for each format.
 
@@ -65,7 +66,6 @@ python pred_llhyp.py -s /path/to/lowlight -t /path/to/ref
 
 
 ## 🚀 Training
-We provide the rendered test views produced by our model on the LOM and SeaThru-NeRF datasets [here](https://drive.google.com/drive/folders/1VtbdbytdmS2Xv9OxrsCL9RPtoOUmIzoG?usp=sharing).
 
 To run the training on LOM dataset:
 ```bash

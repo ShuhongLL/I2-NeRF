@@ -260,11 +260,11 @@ def visualize_suite(rendering, batch, transparent=False):
         sigma_obj = sigma_obj[indices] # [128, samples]
         vis['object_density'] = plt.cm.viridis(sigma_obj.T)
         
-    if 'media_depth' in rendering:
-        vis['vertical_depth'] = visualize_cmap(np.mean(rendering['media_depth'].squeeze(), axis=2),
-                                               acc, cm.get_cmap('turbo'), curve_fn=depth_curve_fn)
     # if 'media_depth' in rendering:
-    #     vis['vertical_depth'] = visualize_cmap(rendering['media_depth'].squeeze(),
+    #     vis['vertical_depth'] = visualize_cmap(np.mean(rendering['media_depth'].squeeze(), axis=2),
     #                                            acc, cm.get_cmap('turbo'), curve_fn=depth_curve_fn)
+    if 'media_depth' in rendering:
+        vis['vertical_depth'] = visualize_cmap(rendering['media_depth'].squeeze(),
+                                               acc, cm.get_cmap('turbo'), curve_fn=depth_curve_fn)
 
     return vis

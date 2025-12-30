@@ -35,7 +35,7 @@ class Config:
     forward_facing: bool = False  # Set to True for forward-facing LLFF captures.
     render_path: bool = False  # If True, render a path. Used only by LLFF.
     llffhold: int = 8  # Use every Nth image for the test set. Used only by LLFF.
-    llff_use_all_images_for_training: bool = True
+    llff_use_all_images_for_training: bool = False
     llff_use_all_images_for_testing: bool = False
     use_tiffs: bool = False  # If True, use 32-bit TIFFs. Used only by Blender.
     compute_disp_metrics: bool = False  # If True, load and compute disparity MSE.
@@ -71,7 +71,7 @@ class Config:
     checkpoints_total_limit: int = 1
     gradient_scaling: bool = False  # If True, scale gradients as in https://gradient-scaling.github.io/.
     print_every: int = 100  # The number of steps between reports to tensorboard.
-    train_render_every: int = 500 # Steps between test set renders when training
+    train_render_every: int = 1000 # Steps between test set renders when training
     data_loss_type: str = 'charb'  # What kind of loss to use ('mse' or 'charb').
     charb_padding: float = 0.001  # The padding used for Charbonnier loss.
     data_loss_mult: float = 1.0  # Mult for the finest data term in the loss.
@@ -129,7 +129,7 @@ class Config:
     # images to be used as spline
     # keyframes, OR directory
     # containing those images.
-    render_spline_n_interp: int = 30  # Num. frames to interpolate per keyframe.
+    render_spline_n_interp: int = 5  # Num. frames to interpolate per keyframe.
     render_spline_degree: int = 5  # Polynomial degree of B-spline interpolation.
     render_spline_smoothness: float = .03  # B-spline smoothing factor, 0 for
     # exact interpolation of keyframes.
@@ -188,7 +188,6 @@ class Config:
     
     # absorb field
     enable_absorb: bool = False
-    absorb_color_consist_mult: float = 0
     absorb_ssim_mult: float = 0
     absorb_trans_multi: float = 0
     luminance_mean: float = 0

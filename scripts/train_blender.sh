@@ -2,10 +2,13 @@
 
 SCENE=bike
 EXPERIMENT=blender/"$SCENE"
-DATA_ROOT=/data/umihebi0/users/shuhong/LOM_full
+DATA_ROOT=/path/to/LOM
 DATA_DIR="$DATA_ROOT"/"$SCENE"
 
-# rm exp/"$EXPERIMENT"/*
-accelerate launch train.py --gin_configs=configs/blender_low.gin \
+export CUDA_VISIBLE_DEVICES=0
+
+# accelerate launch train.py \
+python train.py \
+  --gin_configs="configs/LOM/'${SCENE}'.gin" \
   --gin_bindings="Config.data_dir = '${DATA_DIR}'" \
   --gin_bindings="Config.exp_name = '${EXPERIMENT}'"

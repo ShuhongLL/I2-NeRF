@@ -281,26 +281,6 @@ def absorb_trans_loss(batch, renderings, ray_history, config):
     loss = torch.mean((absorb_tran - bcp_trans) ** 2)
     return config.absorb_trans_multi * loss
 
-    
-def color_consist_loss(renderings, config):
-    data_losses = []
-    for rendering in renderings:
-        if 'light_rgb' not in rendering:
-            continue
-        light_rgb = rendering['light_rgb'] # [batch_size, 1, 1, 3]
-        mean_rgb = torch.mean(light_rgb, dim=0).squeeze() # [3]
-        Drg = torch.pow(mean_rgb[0] - mean_rgb[1], 2)
-        Drb = torch.pow(mean_rgb[1] - mean_rgb[2], 2)
-        Dgb = torch.pow(mean_rgb[2] - mean_rgb[0], 2)
-        data_loss = torch.pow(torch.pow(Drg, 2) + torch.pow(Drb, 2) + torch.pow(Dgb, 2), 0.5)
-        data_losses.append(data_loss)
-    
-    loss = (
-        config.data_coarse_loss_mult * sum(data_losses[:-1]) +
-        config.data_loss_mult * data_losses[-1]
-    )
-    return config.absorb_color_consist_mult * loss
-
 
 def similarity_loss(s3im_func, batch, renderings, config):
     last_rendering = renderings[-1]

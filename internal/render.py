@@ -132,7 +132,6 @@ def cast_rays(tdist, origins, directions, cam_dirs, radii, rand=True, n=7, m=3, 
         backend.synchronize()
         backend.funcs.cast_rays_dpcpp(tdist, origins, directions, cam_dirs, radii, seed1, seed2, seed3, True, 7, 3, 0.5, means, stds)
         backend.synchronize()
-        # todo
         t = 0
 
     else:
@@ -183,28 +182,6 @@ def cast_rays(tdist, origins, directions, cam_dirs, radii, rand=True, n=7, m=3, 
     return means, stds, t
 
 
-# def compute_alpha_weights(density, tdist, dirs, opaque_background=False):
-#     """Helper function for computing alpha compositing weights."""
-#     t_delta = tdist[..., 1:] - tdist[..., :-1]
-#     delta = t_delta * torch.norm(dirs[..., None, :], dim=-1)
-#     density_delta = density * delta
-
-#     if opaque_background:
-#         # Equivalent to making the final t-interval infinitely wide.
-#         density_delta = torch.cat([
-#             density_delta[..., :-1],
-#             torch.full_like(density_delta[..., -1:], torch.inf)
-#         ], dim=-1)
-
-#     alpha = 1 - torch.exp(-density_delta)
-#     trans = torch.exp(-torch.cat([
-#         torch.zeros_like(density_delta[..., :1]),
-#         torch.cumsum(density_delta[..., :-1], dim=-1)
-#     ], dim=-1))
-#     weights = alpha * trans
-#     return weights, alpha, trans
-
-
 def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_absorb, tdist,
                           dirs, extra_samples=False, opaque_background=False):
     t_delta = tdist[..., 1:] - tdist[..., :-1]
@@ -246,10 +223,6 @@ def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_absorb, tdist,
         # Insert 1 in front of the object trans
         extra_trans = torch.ones_like(t_media_dist)[..., :-1]
         obj_trans = torch.cat([extra_trans, obj_trans], dim=-1)
-        
-        # # Insert 0 in front of the object weight
-        # extra_weights = torch.zeros(*obj_weights.shape[:-1], extra_sample_len, requires_grad=False).cuda()
-        # obj_weights = torch.cat([extra_weights, obj_weights], dim=-1)
     else:
         media_delta = t_delta.detach() * torch.norm(dirs[..., None, :], dim=-1)
         
@@ -271,15 +244,6 @@ def compute_alpha_weights(sigma_obj, sigma_atten, sigma_bs, sigma_absorb, tdist,
             torch.cumsum(bs_density_delta[..., :-1, :], dim=-2)
         ], dim=-2))
         
-        # if extra_samples:
-        #     atten_density_delta = sigma_atten * delta[..., None]
-        #     atten_delta = media_delta[..., :(t_media_dist.shape[-1] - 1)] # exclude the last dist
-        #     atten_bs_density_delta = sigma_atten * (atten_delta[..., None])
-        #     atten_trans = torch.exp(-torch.cat([
-        #         torch.zeros_like(atten_density_delta[..., :1, :]),
-        #         torch.cumsum(atten_density_delta[..., :-1, :], dim=-2) + \
-        #         atten_bs_density_delta.sum(dim=-2)[..., None, :]],
-        #     dim=-2))
         atten_density_delta = sigma_atten * media_delta[..., None]
         atten_trans = torch.exp(-torch.cat([
             torch.zeros_like(atten_density_delta[..., :1, :]),

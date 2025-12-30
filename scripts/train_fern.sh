@@ -2,11 +2,10 @@
 
 SCENE=fern
 EXPERIMENT=fern_test/"$SCENE"
-DATA_ROOT=/data/umihebi0/users/shuhong/NeRF_fern
+DATA_ROOT=/path/to/NeRF_data
 DATA_DIR="$DATA_ROOT"/"$SCENE"
 
-# rm exp/"$EXPERIMENT"/*
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 # accelerate launch train.py \
 python train.py \

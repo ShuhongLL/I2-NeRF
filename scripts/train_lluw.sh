@@ -2,11 +2,10 @@
 
 SCENE=scene4_dark
 EXPERIMENT=LLUW/"$SCENE"
-DATA_ROOT=/data/umihebi0/users/shuhong/okinawa
+DATA_ROOT=/path/to/okinawa
 DATA_DIR="$DATA_ROOT"/"$SCENE"
 
-# rm exp/"$EXPERIMENT"/*
-# export CUDA_VISIBLE_DEVICES=6
+export CUDA_VISIBLE_DEVICES=0
 
 # accelerate launch train.py \
 python train.py \

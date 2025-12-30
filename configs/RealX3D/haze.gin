@@ -1,0 +1,28 @@
+Config.project_name = 'media-nerf'
+Config.dataset_loader = 'blender'
+Config.near = 0
+Config.far = 6
+Config.factor = 0
+Config.data_loss_type = 'rawnerf'
+Config.batch_size = 2048
+Config.enable_scatter = True
+Config.enable_downwell_depth = True
+#Config.depth_multi = 0.1
+#Config.media_overlap_multi = 0.0001
+Config.bs_acc_mult = 0.0001
+Config.max_steps = 10000
+
+Model.opaque_background = False
+Model.num_levels = 2
+Model.num_prop_samples = 128
+Model.num_nerf_samples = 32
+Model.num_extra_media_samples = 32
+
+PropMLP.disable_density_normals = True
+PropMLP.disable_rgb = True
+
+NerfMLP.disable_density_normals = True
+
+NerfMLP.max_deg_point = 16
+PropMLP.max_deg_point = 16
+

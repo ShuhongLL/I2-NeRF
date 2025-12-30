@@ -60,8 +60,6 @@ class Camera:
         #    return 5
         #if type_ == 10 or type_ == 'THIN_PRISM_FISHEYE':
         #    return 12
-
-        # TODO: not supporting other camera types, currently
         raise Exception('Camera type not supported')
 
 

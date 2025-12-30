@@ -317,7 +317,6 @@ class SceneManager:
             for camera_id, camera in sorted(self.cameras.iteritems()):
                 fid.write(camera_struct.pack(
                     camera_id, camera.camera_type, camera.width, camera.height))
-                # TODO (True): should move this into the Camera class
                 fid.write(camera.get_params().tobytes())
 
     def _save_cameras_txt(self, output_file):

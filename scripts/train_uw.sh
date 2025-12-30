@@ -1,8 +1,8 @@
 #!/bin/bash
 
-SCENE=Panama
+SCENE=Curasao
 EXPERIMENT=SeaThru/"$SCENE"
-DATA_ROOT=/data/umihebi0/users/shuhong/SeathruNeRF_dataset
+DATA_ROOT=/path/to/SeathruNeRF_dataset
 DATA_DIR="$DATA_ROOT"/"$SCENE"
 
 # accelerate launch train.py \

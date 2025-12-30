@@ -1,7 +1,10 @@
 numpy
-# torch
-# absl_py
+torch
+torchvision
+absl_py
 accelerate
+gradio_imageslider
+gradio==4.29.0
 gin_config
 imageio
 imageio[ffmpeg]
@@ -11,6 +14,7 @@ opencv_contrib_python
 opencv_python
 Pillow
 trimesh
+transformers
 pymeshlab
 xatlas
 plyfile

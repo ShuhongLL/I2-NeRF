@@ -363,7 +363,7 @@ def weighted_percentile(t, w, ps):
     # Vmap fn to an arbitrary number of leading dimensions.
     cw_mat = cw.reshape([-1, cw.shape[-1]])
     t_mat = t.reshape([-1, t.shape[-1]])
-    wprctile_mat = fn(cw_mat, t_mat)  # TODO
+    wprctile_mat = fn(cw_mat, t_mat)
     wprctile = wprctile_mat.reshape(cw.shape[:-1] + (len(ps),))
     return wprctile
 
@@ -397,7 +397,7 @@ def resample(t, tp, vp, use_avg=False):
 
     acc = torch.cumsum(vp, dim=-1)
     acc0 = torch.cat([torch.zeros(acc.shape[:-1] + (1,), device=acc.device), acc], dim=-1)
-    acc0_resampled = math.sorted_interp(t, tp, acc0)  # TODO
+    acc0_resampled = math.sorted_interp(t, tp, acc0)
     v = torch.diff(acc0_resampled, dim=-1)
     return v
 

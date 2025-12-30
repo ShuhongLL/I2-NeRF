@@ -1,0 +1,34 @@
+Config.project_name = 'media-nerf'
+Config.dataset_loader = 'blender'
+Config.near = 0
+Config.far = 6
+Config.factor = 0
+Config.data_loss_type = 'rawnerf'
+Config.batch_size = 4096
+Config.enable_scatter = False
+Config.enable_absorb = True
+Config.enable_spatial_media = True
+Config.enable_bcp = True
+Config.enable_depth_prior = True
+Config.hash_decay_mults = 10
+
+Config.data_loss_mult = 1
+Config.depth_multi = 0.1
+
+Config.luminance_mean = 0.4
+Config.contrast_factor = 4.2
+Config.absorb_trans_multi = 1e-3
+Config.absorb_ssim_mult = 1
+Config.media_overlap_multi = 0.001
+Config.media_monotonic_multi = 0.1
+
+Model.raydist_fn = None
+Model.num_prop_samples = 128
+Model.num_nerf_samples = 64
+Model.num_extra_media_samples = 32
+
+PropMLP.disable_density_normals = True
+PropMLP.disable_rgb = True
+PropMLP.grid_level_dim = 1
+
+NerfMLP.disable_density_normals = True

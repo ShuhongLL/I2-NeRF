@@ -401,16 +401,16 @@ class Dataset(torch.utils.data.Dataset):
 
         if not self.render_path:
             batch['rgb'] = self.images[cam_idx, pix_y_int, pix_x_int]
-        if self._load_disps:
-            batch['disps'] = self.disp_images[cam_idx, pix_y_int, pix_x_int]
-        if self._load_normals:
-            batch['normals'] = self.normal_images[cam_idx, pix_y_int, pix_x_int]
-            batch['alphas'] = self.alphas[cam_idx, pix_y_int, pix_x_int]
-        if self._load_bcp:
-            batch['bcp_trans'] = self.bcp_trans[cam_idx, pix_y_int, pix_x_int]
-            batch['bcp_enhanced'] = self.bcp_enhanced[cam_idx, pix_y_int, pix_x_int]
-        if self._load_depth:
-            batch['depths'] = self.depths[cam_idx, pix_y_int, pix_x_int]
+            if self._load_disps:
+                batch['disps'] = self.disp_images[cam_idx, pix_y_int, pix_x_int]
+            if self._load_normals:
+                batch['normals'] = self.normal_images[cam_idx, pix_y_int, pix_x_int]
+                batch['alphas'] = self.alphas[cam_idx, pix_y_int, pix_x_int]
+            if self._load_bcp:
+                batch['bcp_trans'] = self.bcp_trans[cam_idx, pix_y_int, pix_x_int]
+                batch['bcp_enhanced'] = self.bcp_enhanced[cam_idx, pix_y_int, pix_x_int]
+            if self._load_depth:
+                batch['depths'] = self.depths[cam_idx, pix_y_int, pix_x_int]
         return {k: torch.from_numpy(v.copy()).float() if v is not None else None for k, v in batch.items()}
 
     def _next_train(self, item):
@@ -477,8 +477,15 @@ class Blender(Dataset):
 
     def _load_renderings(self, config):
         """Load images from disk."""
-        if config.render_path:
-            raise ValueError('render_path cannot be used for the blender dataset.')
+        # if config.render_path:
+        #     raise ValueError('render_path cannot be used for the blender dataset.')
+
+        if config.render_path and config.render_path_file is None:
+            raise ValueError(
+                'For the blender dataset, render_path requires Config.render_path_file '
+                'to be set to a .npy file containing [N, 3, 4] cam2world matrices.'
+            )
+
         pose_file = os.path.join(self.data_dir, f'transforms_{self.split.value}.json')
         with utils.open_file(pose_file, 'r') as fp:
             meta = json.load(fp)
@@ -518,7 +525,8 @@ class Blender(Dataset):
                 bcp_trans.append(illum_map)
             if self._load_depth:
                 basename = os.path.splitext(os.path.basename(fprefix))[0]
-                depth = get_img(os.path.join(self.data_dir, 'depth', f'{basename}.png')) / 255.
+                depth = get_img(os.path.join(self.data_dir, 'depth', f'{basename}.png'))
+                depth = (depth - depth.min()) / max(depth.max() - depth.min(), 1e-8) # normalize to [0, 1]
                 depths.append(depth)
                 
             cams.append(np.array(frame['transform_matrix'], dtype=np.float32))
@@ -618,7 +626,7 @@ class LLFF(Dataset):
             self.colmap_to_world_transform = transform
             if config.render_spline_keyframes is not None:
                 rets = camera_utils.create_render_spline_path(config, image_names,
-                                                              poses, self.exposures)
+                                                                poses, self.exposures)
                 self.spline_indices, self.render_poses, self.render_exposures = rets
             else:
                 # Automatically generated inward-facing elliptical render path.
@@ -662,7 +670,6 @@ class LLFF(Dataset):
                 config.exposure_percentile,
                 factor)
             self.metadata = metadata
-
         else:
             # Load images.
             colmap_image_dir = os.path.join(self.data_dir, 'images')

@@ -97,7 +97,6 @@ CREATE_ALL = "; ".join([CREATE_CAMERAS_TABLE, CREATE_DESCRIPTORS_TABLE,
 
 def add_camera(db, model, width, height, params, prior_focal_length=False,
                camera_id=None):
-    # TODO: Parameter count checks
     params = np.asarray(params, np.float64)
     db.execute("INSERT INTO cameras VALUES (?, ?, ?, ?, ?, ?)",
         (camera_id, model, width, height, array_to_blob(params),

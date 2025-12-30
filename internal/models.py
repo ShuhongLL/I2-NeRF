@@ -725,7 +725,6 @@ class MLP(nn.Module):
             rgb = torch.sigmoid(self.rgb_premultiplier *
                                 self.rgb_layer(x) +
                                 self.rgb_bias)
-
             # Apply padding, mapping color to [-rgb_padding, 1+rgb_padding].
             rgb = rgb * (1 + 2 * self.rgb_padding) - self.rgb_padding
             
@@ -746,7 +745,7 @@ class MLP(nn.Module):
                         x = torch.cat([x, mlp_inputs], dim=-1)
                 
                 if self.enable_scatter:
-                    # x = x.mean(dim=-2, keepdim=True)
+                    x = x.mean(dim=-2, keepdim=True) # equivalent to 1D Avgpooling
                     sigma_bs = F.softplus(self.sigma_bs_layer(x) + self.media_bias)
                     sigma_atten = F.softplus(self.sigma_atten_layer(x) + self.media_bias)
 
@@ -759,7 +758,7 @@ class MLP(nn.Module):
                     # Whether use the vertical depth model.
                     if self.enable_downwell_depth:
                         media_depth = F.softplus(self.media_depth_layer(x))
-                        ambient_light = torch.sigmoid(self.light_source) / 3
+                        ambient_light = torch.sigmoid(self.light_source)
                         media_rgb = ambient_light * torch.exp(-sigma_bs.detach() * media_depth)
                     else:
                         media_rgb = torch.sigmoid(self.rgb_premultiplier * self.media_rgb_layer(x) + self.rgb_bias)

@@ -14,6 +14,7 @@ Config.enable_downwell_depth = True
 #Config.depth_multi = 0.1
 #Config.media_overlap_multi = 0.0001
 Config.bs_acc_mult = 0.0001
+Config.max_steps = 10000
 
 Model.opaque_background = False
 Model.num_levels = 2

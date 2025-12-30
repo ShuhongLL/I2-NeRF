@@ -53,9 +53,7 @@ def summarize_results(folder, scene_names, num_buckets):
 
 def main(unused_argv):
     config = configs.load_config()
-    # TODO：： change this!
-    # config.exp_path = os.path.join('exp', config.exp_name)
-    config.exp_path = os.path.join('legacy_exp', config.exp_name)
+    config.exp_path = os.path.join('exp', config.exp_name)
     config.checkpoint_dir = os.path.join(config.exp_path, 'checkpoints')
     config.render_dir = os.path.join(config.exp_path, 'render')
 
@@ -201,23 +199,15 @@ def main(unused_argv):
                     utils.save_img_u8(postprocess_fn(rendering['rgb_cc']),
                                       path_fn(f'color_cc_{idx:03d}.png'))
                     
-                    vis_suite = vis.visualize_suite(rendering, batch)
-                    utils.save_img_u8(vis_suite['vertical_depth'],
-                                      path_fn(f'vertical_depth_{idx:03d}.png'))
-                    utils.save_img_u8(vis_suite['depth_median'],
-                                      path_fn(f'horiz_depth_{idx:03d}.png'))
+                    if config.enable_scatter:
+                        vis_suite = vis.visualize_suite(rendering, batch)
+                        utils.save_img_u8(vis_suite['vertical_depth'],
+                                          path_fn(f'vertical_depth_{idx:03d}.png'))
+                        utils.save_img_u8(vis_suite['depth_median'],
+                                          path_fn(f'horiz_depth_{idx:03d}.png'))
+                        utils.save_img_u8(rendering['J'],
+                                          path_fn(f'J_{idx:03d}.png'))
                     
-                    # for key in ['distance_mean', 'distance_median']:
-                    #     if key in rendering:
-                    #         utils.save_img_f32(rendering[key],
-                    #                            path_fn(f'{key}_{idx:03d}.tiff'))
-
-                    # for key in ['normals']:
-                    #     if key in rendering:
-                    #         utils.save_img_u8(rendering[key] / 2. + 0.5,
-                    #                           path_fn(f'{key}_{idx:03d}.png'))
-                    # utils.save_img_f32(rendering['acc'], path_fn(f'acc_{idx:03d}.tiff'))
-
         if (config.eval_save_output and (not config.render_path) and 
             accelerator.is_main_process):
             with utils.open_file(path_fn(f'render_times_{step}.txt'), 'w') as f:

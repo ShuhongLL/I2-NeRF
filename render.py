@@ -121,7 +121,7 @@ def main(unused_argv):
 
     logger.info(f'Rendering checkpoint at step {step}.')
 
-    out_name = 'path_renders' if config.render_path else 'test_preds'
+    out_name = 'path_renders' if config.render_path else 'train_preds' ## TODO：： change
     out_name = f'{out_name}_step_{step}'
     out_dir = os.path.join(config.render_dir, out_name)
     utils.makedirs(out_dir)
@@ -151,19 +151,24 @@ def main(unused_argv):
         if accelerator.is_main_process:  # Only record via host 0.
             rendering['rgb'] = postprocess_fn(rendering['rgb'])
             rendering = tree_map(lambda x: x.detach().cpu().numpy() if x is not None else None, rendering)
+            batch = tree_map(lambda x: x.detach().cpu().numpy() if x is not None else None, batch)
+            vis_suite = vis.visualize_suite(rendering, batch)
+            
             utils.save_img_u8(rendering['rgb'], path_fn(f'color_{idx_str}.png'))
-            if 'normals' in rendering:
-                utils.save_img_u8(rendering['normals'] / 2. + 0.5,
-                                  path_fn(f'normals_{idx_str}.png'))
-            utils.save_img_f32(rendering['distance_mean'],
-                               path_fn(f'distance_mean_{idx_str}.tiff'))
-            utils.save_img_f32(rendering['distance_median'],
-                               path_fn(f'distance_median_{idx_str}.tiff'))
-            utils.save_img_f32(rendering['acc'], path_fn(f'acc_{idx_str}.tiff'))
-    num_files = len(glob.glob(path_fn('acc_*.tiff')))
-    if accelerator.is_main_process and num_files == dataset.size:
-        logger.info(f'All files found, creating videos.')
-        create_videos(config, config.render_dir, out_dir, out_name, dataset.size)
+            # utils.save_img_u8(vis_suite['depth_mean'], path_fn(f'depth_mean_{idx_str}.png'))
+            # utils.save_img_u8(vis_suite['depth_median'], path_fn(f'depth_median_{idx_str}.png'))
+            if config.enable_scatter:
+                utils.save_img_u8(vis_suite['vertical_depth'], path_fn(f'vdepth_{idx:03d}.png'))
+                utils.save_img_u8(vis_suite['depth_median'], path_fn(f'hdepth_{idx:03d}.png'))
+                utils.save_img_u8(rendering['J'], path_fn(f'obj_{idx:03d}.png'))
+            if config.enable_absorb:
+                utils.save_img_u8(rendering['light_rgb'], path_fn(f'light_{idx:03d}.png'))
+            # utils.save_img_f32(rendering['acc'], path_fn(f'acc_{idx_str}.tiff'))
+
+    # num_files = len(glob.glob(path_fn('acc_*.tiff')))
+    # if accelerator.is_main_process and num_files == dataset.size:
+    #     logger.info(f'All files found, creating videos.')
+    #     create_videos(config, config.render_dir, out_dir, out_name, dataset.size)
     accelerator.wait_for_everyone()
     logger.info('Finish rendering.')
 

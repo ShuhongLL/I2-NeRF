@@ -17,7 +17,7 @@ Config.depth_multi = 0.1
 
 Config.luminance_mean = 0.490
 Config.contrast_factor = 3.57
-Config.absorb_trans_multi = 1e-4
+Config.absorb_trans_multi = 1e-3
 Config.absorb_ssim_mult = 1
 Config.media_overlap_multi = 0.001
 Config.media_monotonic_multi = 0.1

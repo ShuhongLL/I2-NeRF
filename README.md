@@ -19,7 +19,7 @@
 ```
 git clone git@github.com:ShuhongLL/I2-NeRF.git
 ```
-Our NeRF framework is built on a [PyTorch implementation of ZipNeRF]((https://github.com/SuLvXiangXin/zipnerf-pytorch)) and uses the same environment configuration. For more setup options (nvdiffrast, DPCPP, etc.), please refer to the its installation instructions.
+Our NeRF framework is built on a [PyTorch implementation of ZipNeRF](https://github.com/SuLvXiangXin/zipnerf-pytorch) and uses the same environment configuration. For more setup options (nvdiffrast, DPCPP, etc.), please refer to its installation instructions.
 ```
 conda create --name zipnerf python=3.9
 conda activate zipnerf
